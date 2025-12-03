@@ -1,0 +1,12 @@
+# Секреты
+.env
+nginx/api-keys-*.conf
+
+# Docker volumes
+postgres-data/
+neo4j-data/
+ollama-data/
+
+# Logs
+*.log
+mem0-src/
