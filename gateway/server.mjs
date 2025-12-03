@@ -1,11 +1,10 @@
 import express from "express";
-import EventSource from "eventsource";
-import { v4 as uuidv4 } from "uuid";
 import fs from "fs";
 
 const app = express();
 app.use(express.json());
 
+// Load API keys
 const loadApiKeys = (project) => {
   const filePath = `/etc/nginx/api-keys-${project}.conf`;
   try {
@@ -24,7 +23,10 @@ const loadApiKeys = (project) => {
 
 const terraKeys = loadApiKeys("terra");
 const sportKeys = loadApiKeys("sport");
-const sessions = new Map();
+const sessions = new Map(); // session_id -> project mapping
+
+console.log(`Terra keys loaded: ${terraKeys.size}`);
+console.log(`Sport keys loaded: ${sportKeys.size}`);
 
 const validateKey = (key) => {
   if (terraKeys.has(key)) return "terra";
@@ -32,38 +34,9 @@ const validateKey = (key) => {
   return null;
 };
 
-const connectToBackend = async (project) => {
-  const backendUrl = `http://mcp-${project}:8080/sse/`;
-  
-  return new Promise((resolve, reject) => {
-    const es = new EventSource(backendUrl);
-    
-    es.addEventListener("endpoint", (event) => {
-      const match = event.data.match(/session_id=([a-f0-9]+)/);
-      if (match) {
-        resolve({
-          sessionId: match[1],
-          messagesUrl: `http://mcp-${project}:8080/sse/messages/?session_id=${match[1]}`,
-          eventSource: es
-        });
-      }
-    });
-
-    es.onerror = (err) => {
-      es.close();
-      reject(new Error("Backend connection failed"));
-    };
-
-    setTimeout(() => {
-      es.close();
-      reject(new Error("Backend connection timeout"));
-    }, 10000);
-  });
-};
-
-// GET /sse/?key=API_KEY
+// SSE endpoint - proxy to backend
 app.get("/sse/", async (req, res) => {
-  const apiKey = req.query.key || req.headers["x-api-key"];
+  const apiKey = req.query.key;
   
   if (!apiKey) {
     return res.status(401).json({ error: "API key required" });
@@ -74,88 +47,132 @@ app.get("/sse/", async (req, res) => {
     return res.status(401).json({ error: "Invalid API key" });
   }
 
-  res.setHeader("Content-Type", "text/event-stream");
-  res.setHeader("Cache-Control", "no-cache");
-  res.setHeader("Connection", "keep-alive");
-  res.flushHeaders();
+  console.log(`[SSE] ${project} - new connection`);
 
+  const backendUrl = `http://mcp-${project}:8080/sse/`;
+  
   try {
-    const backend = await connectToBackend(project);
-    const clientSessionId = uuidv4().replace(/-/g, "");
-    
-    sessions.set(clientSessionId, {
-      project,
-      apiKey,
-      backendSessionId: backend.sessionId,
-      messagesUrl: backend.messagesUrl,
-      eventSource: backend.eventSource
+    const response = await fetch(backendUrl, {
+      headers: { "Accept": "text/event-stream" }
     });
 
-    // Return full path including /mcp/ prefix
-    res.write(`event: endpoint\ndata: /mcp/sse/messages/?session_id=${clientSessionId}\n\n`);
+    if (!response.ok) {
+      return res.status(response.status).json({ error: "Backend error" });
+    }
 
-    backend.eventSource.addEventListener("message", (event) => {
-      res.write(`event: message\ndata: ${event.data}\n\n`);
-    });
+    // Set SSE headers
+    res.setHeader("Content-Type", "text/event-stream");
+    res.setHeader("Cache-Control", "no-cache");
+    res.setHeader("Connection", "keep-alive");
+    res.flushHeaders();
+
+    // Stream response, rewriting paths
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+
+    const pump = async () => {
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          let text = decoder.decode(value);
+          
+          // Rewrite path: /sse/messages/ -> /mcp/sse/messages/
+          // Also extract session_id to track which project it belongs to
+          const sessionMatch = text.match(/session_id=([a-f0-9]+)/);
+          if (sessionMatch) {
+            sessions.set(sessionMatch[1], project);
+            console.log(`[SSE] Registered session ${sessionMatch[1]} for ${project}`);
+          }
+          
+          text = text.replace(/data: \/sse\//g, "data: /mcp/sse/");
+          res.write(text);
+        }
+      } catch (e) {
+        console.error(`[SSE] Stream error: ${e.message}`);
+      }
+    };
+
+    pump();
 
     req.on("close", () => {
-      backend.eventSource.close();
-      sessions.delete(clientSessionId);
-      console.log(`Session ${clientSessionId} closed`);
+      console.log(`[SSE] ${project} - connection closed`);
+      reader.cancel();
     });
 
   } catch (err) {
-    console.error("Backend connection error:", err);
-    res.write(`event: error\ndata: ${JSON.stringify({ error: err.message })}\n\n`);
-    res.end();
+    console.error(`[SSE] Backend error: ${err.message}`);
+    res.status(502).json({ error: "Backend connection failed" });
   }
 });
 
-// POST /sse/messages/?session_id=XXX
+// Messages endpoint - proxy POST
 app.post("/sse/messages/", async (req, res) => {
   const sessionId = req.query.session_id;
   
   if (!sessionId) {
     return res.status(400).json({ error: "session_id required" });
   }
-
-  const session = sessions.get(sessionId);
-  if (!session) {
-    return res.status(404).json({ error: "Session not found" });
+  
+  // Get project from session map
+  const project = sessions.get(sessionId);
+  
+  if (!project) {
+    console.log(`[POST] Unknown session ${sessionId}, trying terra`);
+    // Fallback to terra
   }
 
+  const targetProject = project || "terra";
+  const backendUrl = `http://mcp-${targetProject}:8080/sse/messages/?session_id=${sessionId}`;
+  
+  console.log(`[POST] ${targetProject} - session ${sessionId}`);
+
   try {
-    const response = await fetch(session.messagesUrl, {
+    const response = await fetch(backendUrl, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(req.body)
     });
 
-    const data = await response.text();
+    const contentType = response.headers.get("content-type");
     
-    res.setHeader("Content-Type", "text/event-stream");
-    res.setHeader("Cache-Control", "no-cache");
-    res.write(`event: message\ndata: ${data}\n\n`);
-    res.end();
+    if (contentType?.includes("text/event-stream")) {
+      res.setHeader("Content-Type", "text/event-stream");
+      res.setHeader("Cache-Control", "no-cache");
+      res.setHeader("Connection", "keep-alive");
+      res.flushHeaders();
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        res.write(decoder.decode(value));
+      }
+      res.end();
+    } else {
+      const data = await response.text();
+      res.setHeader("Content-Type", contentType || "application/json");
+      res.status(response.status).send(data);
+    }
 
   } catch (err) {
-    console.error("Backend request error:", err);
-    res.status(500).json({ error: "Backend request failed" });
+    console.error(`[POST] Error: ${err.message}`);
+    res.status(502).json({ error: "Backend request failed" });
   }
 });
 
+// Health
 app.get("/health", (req, res) => {
-  res.json({ 
-    status: "ok", 
-    sessions: sessions.size,
-    terraKeys: terraKeys.size,
-    sportKeys: sportKeys.size
-  });
+  res.json({ status: "ok", terraKeys: terraKeys.size, sportKeys: sportKeys.size, sessions: sessions.size });
+});
+
+app.get("/", (req, res) => {
+  res.json({ message: "MCP Gateway", usage: "/sse/?key=API_KEY" });
 });
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`MCP Gateway running on port ${PORT}`);
-  console.log(`Terra keys loaded: ${terraKeys.size}`);
-  console.log(`Sport keys loaded: ${sportKeys.size}`);
 });
