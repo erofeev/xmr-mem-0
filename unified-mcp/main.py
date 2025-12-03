@@ -333,6 +333,39 @@ class CogneeManager:
             logger.error(f"❌ Failed to get relationships: {e}")
             return []
 
+    async def clear_graph(self) -> dict:
+        """Clear the entire knowledge graph for this project."""
+        if not self.initialized:
+            await self.initialize()
+        
+        try:
+            from neo4j import GraphDatabase
+            
+            driver = GraphDatabase.driver(
+                NEO4J_URI,
+                auth=("neo4j", NEO4J_PASSWORD)
+            )
+            
+            db_name = f"cognee_{self.project_id}"
+            
+            with driver.session(database=db_name) as session:
+                result = session.run("MATCH (n) DETACH DELETE n")
+                summary = result.consume()
+                
+            driver.close()
+            
+            logger.info(f"🧹 Cleared Cognee graph for project '{self.project_id}'")
+            
+            return {
+                "status": "success",
+                "message": f"Cleared knowledge graph for project '{self.project_id}'",
+                "project": self.project_id
+            }
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to clear graph: {e}")
+            return {"status": "error", "message": str(e)}
+
 
 # ============================================
 # Knowledge Base Manager (FAISS + Ollama)
@@ -547,25 +580,223 @@ class KnowledgeBaseManager:
                     })
         return kbs
 
-    async def add_document(self, kb_name: str, filename: str, content: str) -> bool:
-        """Add a document to knowledge base and reindex."""
+    async def add_document(
+        self, 
+        kb_name: str, 
+        filename: str, 
+        content: str,
+        replace: bool = False
+    ) -> dict:
+        """Add a document to knowledge base with optional replacement.
+        
+        Args:
+            kb_name: Name of the knowledge base
+            filename: Name of the file (will add .md extension if missing)
+            content: Document content (markdown)
+            replace: If True, replace existing file with same name
+        
+        Returns:
+            Status dict with document metadata
+        """
         try:
+            # Ensure .md extension
+            if not filename.endswith('.md'):
+                filename = f"{filename}.md"
+            
             kb_path = self.kb_root / kb_name
             kb_path.mkdir(parents=True, exist_ok=True)
-
-            if not filename.endswith(".md"):
-                filename += ".md"
-
+            
             file_path = kb_path / filename
-            file_path.write_text(content, encoding="utf-8")
+            file_exists = file_path.exists()
+            
+            # Check if file exists and replace not requested
+            if file_exists and not replace:
+                return {
+                    "status": "error",
+                    "message": f"File '{filename}' already exists. Use replace=True to overwrite.",
+                    "existing_file": filename,
+                    "hint": "Set replace=True to update the document"
+                }
+            
+            # Add metadata header with timestamp
+            timestamp = datetime.now().isoformat()
+            metadata_header = f"""---
+filename: {filename}
+knowledge_base: {kb_name}
+project: {self.project_id}
+created_at: {timestamp if not file_exists else 'preserved'}
+updated_at: {timestamp}
+version: {'updated' if file_exists and replace else 'initial'}
+---
 
-            logger.info(f"📝 Added document: {file_path}")
+"""
+            
+            # Check if content already has frontmatter - preserve it but update timestamp
+            if content.strip().startswith('---'):
+                # Find end of frontmatter and update updated_at
+                lines = content.split('\n')
+                in_frontmatter = False
+                new_lines = []
+                updated_at_added = False
+                
+                for line in lines:
+                    if line.strip() == '---':
+                        if not in_frontmatter:
+                            in_frontmatter = True
+                            new_lines.append(line)
+                        else:
+                            if not updated_at_added:
+                                new_lines.append(f"updated_at: {timestamp}")
+                            new_lines.append(line)
+                            in_frontmatter = False
+                    elif in_frontmatter and line.startswith('updated_at:'):
+                        new_lines.append(f"updated_at: {timestamp}")
+                        updated_at_added = True
+                    else:
+                        new_lines.append(line)
+                
+                full_content = '\n'.join(new_lines)
+            else:
+                full_content = metadata_header + content
+            
+            # Write file
+            file_path.write_text(full_content, encoding="utf-8")
+            
+            action = "replaced" if file_exists and replace else "created"
+            logger.info(f"📝 Document {action}: {filename} in {kb_name}")
+            
+            # Rebuild index
             await self.create_index(kb_name)
-            return True
-
+            
+            return {
+                "status": "success",
+                "message": f"Document {action} successfully",
+                "knowledge_base": kb_name,
+                "filename": filename,
+                "action": action,
+                "updated_at": timestamp,
+                "content_length": len(content)
+            }
+            
         except Exception as e:
             logger.error(f"❌ Failed to add document: {e}")
-            return False
+            return {"status": "error", "message": str(e)}
+
+    async def delete_document(self, kb_name: str, filename: str) -> dict:
+        """Delete a specific document from knowledge base and reindex."""
+        try:
+            if not filename.endswith('.md'):
+                filename = f"{filename}.md"
+            
+            kb_path = self.kb_root / kb_name
+            file_path = kb_path / filename
+            
+            if not file_path.exists():
+                return {
+                    "status": "error",
+                    "message": f"File '{filename}' not found in '{kb_name}'"
+                }
+            
+            file_path.unlink()
+            logger.info(f"🗑️ Deleted document: {filename} from {kb_name}")
+            
+            await self.create_index(kb_name)
+            
+            return {
+                "status": "success",
+                "message": f"Deleted '{filename}' and reindexed '{kb_name}'",
+                "knowledge_base": kb_name,
+                "deleted_file": filename
+            }
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to delete document: {e}")
+            return {"status": "error", "message": str(e)}
+
+    async def clear_knowledge_base(self, kb_name: str) -> dict:
+        """Clear all documents from a knowledge base."""
+        try:
+            kb_path = self.kb_root / kb_name
+            
+            if not kb_path.exists():
+                return {
+                    "status": "error",
+                    "message": f"Knowledge base '{kb_name}' not found"
+                }
+            
+            md_files = list(kb_path.glob("**/*.md"))
+            file_count = len(md_files)
+            
+            for md_file in md_files:
+                md_file.unlink()
+            
+            index_path = self.index_dir / f"{kb_name}.index"
+            docs_path = self.index_dir / f"{kb_name}_docs.json"
+            
+            if index_path.exists():
+                index_path.unlink()
+            if docs_path.exists():
+                docs_path.unlink()
+            
+            if kb_name in self.indexes:
+                del self.indexes[kb_name]
+            if kb_name in self.documents:
+                del self.documents[kb_name]
+            
+            logger.info(f"🧹 Cleared knowledge base '{kb_name}': {file_count} files deleted")
+            
+            return {
+                "status": "success",
+                "message": f"Cleared '{kb_name}'",
+                "knowledge_base": kb_name,
+                "deleted_files_count": file_count
+            }
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to clear knowledge base: {e}")
+            return {"status": "error", "message": str(e)}
+
+    def list_documents(self, kb_name: str) -> list:
+        """List all documents in a knowledge base with metadata."""
+        try:
+            kb_path = self.kb_root / kb_name
+            
+            if not kb_path.exists():
+                return []
+            
+            documents = []
+            for md_file in kb_path.glob("**/*.md"):
+                content = md_file.read_text(encoding="utf-8")
+                
+                metadata = {}
+                if content.strip().startswith('---'):
+                    lines = content.split('\n')
+                    in_frontmatter = False
+                    for line in lines:
+                        if line.strip() == '---':
+                            if not in_frontmatter:
+                                in_frontmatter = True
+                            else:
+                                break
+                        elif in_frontmatter and ':' in line:
+                            key, value = line.split(':', 1)
+                            metadata[key.strip()] = value.strip()
+                
+                stat = md_file.stat()
+                documents.append({
+                    "filename": md_file.name,
+                    "path": str(md_file.relative_to(kb_path)),
+                    "size_bytes": stat.st_size,
+                    "modified_at": datetime.fromtimestamp(stat.st_mtime).isoformat(),
+                    "metadata": metadata
+                })
+            
+            documents.sort(key=lambda x: x["modified_at"], reverse=True)
+            return documents
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to list documents: {e}")
+            return []
 
     def get_stats(self, kb_name: str) -> dict:
         """Get statistics for a knowledge base."""
@@ -807,30 +1038,120 @@ async def kb_list() -> str:
 
 
 @mcp.tool()
-async def kb_add(knowledge_base: str, filename: str, content: str) -> str:
+async def kb_add(
+    knowledge_base: str, 
+    filename: str, 
+    content: str,
+    replace: bool = False
+) -> str:
     """
     Add a document to a knowledge base (shared across all project users).
+    
+    Automatically adds metadata (timestamps, version) as YAML frontmatter.
+    If a file with the same name exists, use replace=True to update it.
 
     Args:
-        knowledge_base: Name of the knowledge base
+        knowledge_base: Name of the knowledge base (created if doesn't exist)
         filename: Name of the file (will add .md extension if missing)
         content: Document content (markdown)
+        replace: If True, replace existing file with same name (default: False)
 
     Returns:
-        Confirmation message
+        JSON with document metadata including timestamps
+    
+    Examples:
+        # Add new document
+        kb_add("arch", "api-design.md", "# API Design\n...")
+        
+        # Update existing document  
+        kb_add("arch", "api-design.md", "# Updated API\n...", replace=True)
     """
     global kb_manager
 
     if kb_manager is None:
-        return "❌ Knowledge base manager not initialized"
+        return json.dumps({"error": "Knowledge base manager not initialized"})
 
-    try:
-        success = await kb_manager.add_document(knowledge_base, filename, content)
-        if success:
-            return f"✅ Document '{filename}' added to '{knowledge_base}' (project: {PROJECT_ID}) and reindexed"
-        return f"❌ Failed to add document"
-    except Exception as e:
-        return f"❌ Failed to add document: {e}"
+    result = await kb_manager.add_document(knowledge_base, filename, content, replace)
+    return json.dumps(result, ensure_ascii=False, indent=2)
+
+
+@mcp.tool()
+async def kb_delete(knowledge_base: str, filename: str) -> str:
+    """
+    Delete a specific document from knowledge base.
+    
+    Removes the document and automatically reindexes the knowledge base.
+    Use this when a document is outdated or no longer needed.
+    
+    Args:
+        knowledge_base: Name of the knowledge base
+        filename: Name of the file to delete (e.g., "architecture-v1.md")
+    
+    Returns:
+        JSON with deletion status
+    """
+    global kb_manager
+    
+    if kb_manager is None:
+        return json.dumps({"error": "Knowledge base manager not initialized"})
+    
+    result = await kb_manager.delete_document(knowledge_base, filename)
+    return json.dumps(result, ensure_ascii=False, indent=2)
+
+
+@mcp.tool()
+async def kb_clear(knowledge_base: str) -> str:
+    """
+    Clear ALL documents from a knowledge base.
+    
+    ⚠️ WARNING: This permanently deletes all documents!
+    Use with caution. Useful when you need to completely refresh a KB.
+    
+    Args:
+        knowledge_base: Name of the knowledge base to clear
+    
+    Returns:
+        JSON with status and count of deleted files
+    """
+    global kb_manager
+    
+    if kb_manager is None:
+        return json.dumps({"error": "Knowledge base manager not initialized"})
+    
+    result = await kb_manager.clear_knowledge_base(knowledge_base)
+    return json.dumps(result, ensure_ascii=False, indent=2)
+
+
+@mcp.tool()
+async def kb_list_documents(knowledge_base: str) -> str:
+    """
+    List all documents in a knowledge base with metadata.
+    
+    Returns information about each document including:
+    - Filename and path
+    - File size and modification time
+    - Frontmatter metadata (if present)
+    
+    Documents sorted by modification time (newest first).
+    
+    Args:
+        knowledge_base: Name of the knowledge base
+    
+    Returns:
+        JSON array of document metadata
+    """
+    global kb_manager
+    
+    if kb_manager is None:
+        return json.dumps({"error": "Knowledge base manager not initialized"})
+    
+    documents = kb_manager.list_documents(knowledge_base)
+    return json.dumps({
+        "knowledge_base": knowledge_base,
+        "project": PROJECT_ID,
+        "document_count": len(documents),
+        "documents": documents
+    }, ensure_ascii=False, indent=2)
 
 
 @mcp.tool()

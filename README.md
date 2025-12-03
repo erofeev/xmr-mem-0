@@ -851,3 +851,136 @@ memory_add(
 )
 ```
 
+
+---
+
+## Управление версиями документов
+
+### Проблема версионирования в KB
+
+Knowledge Base хранит документы как файлы. Если добавить несколько версий одного документа с разными именами:
+
+```python
+kb_add("arch", "architecture-v1.md", "API использует REST")
+kb_add("arch", "architecture-v2.md", "API использует GraphQL")  
+
+# Поиск вернёт ОБА результата!
+kb_search("arch", "какой API используется")
+# → 1. "GraphQL" (v2)
+# → 2. "REST" (v1) — УСТАРЕВШЕЕ!
+```
+
+### Решение: Новые инструменты управления
+
+#### `kb_add` с параметром `replace`
+
+```python
+# Добавить документ
+kb_add("arch", "architecture.md", "# Architecture v1\nREST API...")
+
+# Обновить тот же документ (перезапись)
+kb_add("arch", "architecture.md", "# Architecture v2\nGraphQL...", replace=True)
+# → Старая версия заменена, поиск вернёт только актуальное
+```
+
+**Автоматические метаданные:**
+```yaml
+---
+filename: architecture.md
+knowledge_base: arch
+project: terra
+created_at: 2024-12-01T10:00:00
+updated_at: 2024-12-15T14:30:00  # Обновляется при replace
+version: updated
+---
+```
+
+#### `kb_delete` — Удаление устаревших документов
+
+```python
+# Удалить старую версию
+kb_delete("arch", "architecture-v1.md")
+# → {"status": "success", "deleted_file": "architecture-v1.md"}
+
+# Индекс автоматически пересоздаётся
+```
+
+#### `kb_clear` — Полная очистка KB
+
+```python
+# ⚠️ Удалить ВСЕ документы из базы
+kb_clear("old-docs")
+# → {"deleted_files_count": 15}
+```
+
+#### `kb_list_documents` — Просмотр документов
+
+```python
+kb_list_documents("arch")
+# → {
+#     "document_count": 5,
+#     "documents": [
+#       {"filename": "api.md", "updated_at": "2024-12-15T14:30:00", ...},
+#       {"filename": "db.md", "updated_at": "2024-12-10T09:00:00", ...}
+#     ]
+#   }
+```
+
+---
+
+### Версионирование в Cognee
+
+**Cognee работает иначе** — он накапливает данные в графе:
+
+```python
+# Первое добавление
+cognee_add("API Gateway использует REST")
+# → Entity: "API Gateway", связь: "uses" → "REST"
+
+# Второе добавление (обновление)
+cognee_add("API Gateway использует GraphQL")
+# → ДОБАВЛЯЕТСЯ новая связь: "uses" → "GraphQL"
+# → Старая связь с REST остаётся!
+```
+
+**Результат:** Граф содержит обе версии информации.
+
+#### Решение: `cognee_clear`
+
+```python
+# Очистить граф и начать заново
+cognee_clear()
+# → Все сущности и связи удалены
+
+# Добавить актуальную информацию
+cognee_add("API Gateway использует GraphQL (актуально)")
+```
+
+---
+
+### Рекомендации по версионированию
+
+| Компонент | Стратегия | Инструменты |
+|-----------|-----------|-------------|
+| **KB** | Один файл на тему, обновлять через `replace=True` | `kb_add(replace=True)`, `kb_delete` |
+| **Cognee** | Периодически очищать и перезагружать | `cognee_clear`, `cognee_add` |
+| **Memory** | Автодедупликация (с LLM), или ручная | Встроенная в Mem0 |
+
+### Workflow обновления документации
+
+```python
+# 1. Посмотреть текущие документы
+kb_list_documents("architecture")
+
+# 2. Обновить существующий документ
+kb_add("architecture", "api-design.md", NEW_CONTENT, replace=True)
+
+# 3. Удалить устаревшие
+kb_delete("architecture", "api-design-old.md")
+kb_delete("architecture", "api-design-draft.md")
+
+# 4. Для Cognee — полная перезагрузка
+cognee_clear()
+cognee_add(content=CURRENT_ARCHITECTURE, source="arch")
+```
+
