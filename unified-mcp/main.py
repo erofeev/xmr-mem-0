@@ -1,12 +1,15 @@
 """
-Unified MCP Server for Mem0 + Knowledge Base
+Unified MCP Server for Mem0 + Knowledge Base + Cognee
 
 Combines:
-- Mem0 memory tools (via HTTP API to mem0-server)
-- Knowledge Base tools (local FAISS indexes)
-- Optional: Cognee knowledge graph
+- Mem0 memory tools (via HTTP API to mem0-server) - PER USER isolation
+- Knowledge Base tools (local FAISS indexes) - SHARED per project
+- Cognee knowledge graph tools - SHARED per project
 
-Project-aware: CURRENT_PROJECT_ID defines isolation.
+Isolation model:
+- PROJECT_ID: determines which project (terra, sport, etc.)
+- user_id (parameter): determines memory isolation within project
+- Knowledge Base and Cognee are shared across all users in the project
 """
 
 import asyncio
@@ -50,23 +53,295 @@ KNOWLEDGE_BASES_ROOT = Path(os.getenv("KNOWLEDGE_BASES_ROOT", "/data/knowledge_b
 FAISS_INDEX_DIR = Path(os.getenv("FAISS_INDEX_DIR", "/data/faiss_indexes"))
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://ollama:11434")
 OLLAMA_EMBEDDING_MODEL = os.getenv("OLLAMA_EMBEDDING_MODEL", "nomic-embed-text")
+OLLAMA_LLM_MODEL = os.getenv("OLLAMA_LLM_MODEL", "gemma3:1b")
 KB_CHUNK_SIZE = int(os.getenv("KB_CHUNK_SIZE", "1000"))
 KB_CHUNK_OVERLAP = int(os.getenv("KB_CHUNK_OVERLAP", "200"))
 COGNEE_ENABLED = os.getenv("COGNEE_ENABLED", "false").lower() == "true"
+DEFAULT_USER_ID = os.getenv("DEFAULT_USER_ID", "default")
+
+# Neo4j for Cognee
+NEO4J_URI = os.getenv("NEO4J_URI", "bolt://neo4j:7687")
+NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD", "password")
 
 # Global instances
 http_client: Optional[httpx.AsyncClient] = None
 kb_manager: Optional["KnowledgeBaseManager"] = None
+cognee_manager: Optional["CogneeManager"] = None
 
 # Initialize FastMCP server
 mcp = FastMCP(f"unified-{PROJECT_ID}", host="0.0.0.0")
+
+
+def get_full_user_id(user_id: Optional[str] = None) -> str:
+    """Generate full user_id with project prefix for Mem0 isolation."""
+    uid = user_id or DEFAULT_USER_ID
+    return f"{PROJECT_ID}_{uid}"
+
+
+# ============================================
+# Cognee Manager (Knowledge Graph)
+# ============================================
+class CogneeManager:
+    """Manages Cognee knowledge graph operations.
+
+    Cognee provides:
+    - Entity extraction from text
+    - Relationship detection between entities
+    - Knowledge graph storage (Neo4j)
+    - Graph-based search and reasoning
+    """
+
+    def __init__(self, project_id: str):
+        self.project_id = project_id
+        self.initialized = False
+        self._cognee = None
+
+    async def initialize(self):
+        """Initialize Cognee with configuration.
+
+        Cognee 0.4.x uses environment variables for configuration:
+        - LLM_PROVIDER, LLM_MODEL, LLM_ENDPOINT, LLM_API_KEY
+        - EMBEDDING_PROVIDER, EMBEDDING_MODEL, EMBEDDING_ENDPOINT
+        - GRAPH_DATABASE_PROVIDER, GRAPH_DATABASE_URL, GRAPH_DATABASE_USERNAME
+        """
+        if self.initialized:
+            return True
+
+        try:
+            import cognee
+            self._cognee = cognee
+
+            # Cognee 0.4.x reads configuration from environment variables
+            # No need to call config.set_* methods - they are deprecated
+
+            # Just verify cognee is importable and ready
+            logger.info(f"📊 Cognee version: {cognee.__version__ if hasattr(cognee, '__version__') else 'unknown'}")
+            logger.info(f"   LLM_PROVIDER: {os.getenv('LLM_PROVIDER', 'not set')}")
+            logger.info(f"   LLM_MODEL: {os.getenv('LLM_MODEL', 'not set')}")
+            logger.info(f"   GRAPH_DATABASE_PROVIDER: {os.getenv('GRAPH_DATABASE_PROVIDER', 'not set')}")
+
+            self.initialized = True
+            logger.info(f"✅ Cognee initialized for project '{self.project_id}'")
+            return True
+
+        except ImportError:
+            logger.warning("⚠️ Cognee not installed. Install with: pip install cognee")
+            return False
+        except Exception as e:
+            logger.error(f"❌ Failed to initialize Cognee: {e}")
+            return False
+
+    async def add_knowledge(self, content: str, source: str = "unknown") -> dict:
+        """Add content to Cognee knowledge graph.
+
+        This will:
+        1. Extract entities from content
+        2. Detect relationships
+        3. Store in knowledge graph
+        """
+        if not self.initialized:
+            await self.initialize()
+
+        if not self._cognee:
+            return {"error": "Cognee not available"}
+
+        try:
+            # Add content to Cognee
+            await self._cognee.add(content, dataset_name=self.project_id)
+
+            # Process and build knowledge graph
+            await self._cognee.cognify()
+
+            return {
+                "status": "success",
+                "source": source,
+                "project": self.project_id,
+                "message": "Content processed and added to knowledge graph"
+            }
+
+        except Exception as e:
+            logger.error(f"❌ Cognee add failed: {e}")
+            return {"error": str(e)}
+
+    async def search(self, query: str, search_type: str = "insights") -> list[dict]:
+        """Search Cognee knowledge graph.
+
+        Args:
+            query: Search query
+            search_type: Type of search - 'insights', 'chunks', or 'graph_completion'
+        """
+        if not self.initialized:
+            await self.initialize()
+
+        if not self._cognee:
+            return []
+
+        try:
+            results = await self._cognee.search(
+                query_type=search_type,
+                query_text=query
+            )
+
+            # Format results
+            formatted = []
+            for result in results:
+                formatted.append({
+                    "content": str(result),
+                    "type": search_type,
+                    "project": self.project_id
+                })
+
+            return formatted
+
+        except Exception as e:
+            logger.error(f"❌ Cognee search failed: {e}")
+            return []
+
+    async def get_graph_stats(self) -> dict:
+        """Get statistics about the knowledge graph."""
+        if not self.initialized:
+            await self.initialize()
+
+        try:
+            # Query Neo4j for stats
+            from neo4j import GraphDatabase
+
+            driver = GraphDatabase.driver(
+                NEO4J_URI,
+                auth=("neo4j", NEO4J_PASSWORD)
+            )
+
+            with driver.session(database=f"cognee_{self.project_id}") as session:
+                # Count nodes
+                node_result = session.run("MATCH (n) RETURN count(n) as count")
+                node_count = node_result.single()["count"]
+
+                # Count relationships
+                rel_result = session.run("MATCH ()-[r]->() RETURN count(r) as count")
+                rel_count = rel_result.single()["count"]
+
+                # Get node labels
+                labels_result = session.run("CALL db.labels()")
+                labels = [record["label"] for record in labels_result]
+
+                # Get relationship types
+                types_result = session.run("CALL db.relationshipTypes()")
+                rel_types = [record["relationshipType"] for record in types_result]
+
+            driver.close()
+
+            return {
+                "project": self.project_id,
+                "nodes": node_count,
+                "relationships": rel_count,
+                "node_labels": labels,
+                "relationship_types": rel_types
+            }
+
+        except Exception as e:
+            logger.error(f"❌ Failed to get graph stats: {e}")
+            return {
+                "project": self.project_id,
+                "error": str(e)
+            }
+
+    async def get_entities(self, entity_type: Optional[str] = None, limit: int = 50) -> list[dict]:
+        """Get entities from knowledge graph."""
+        if not self.initialized:
+            await self.initialize()
+
+        try:
+            from neo4j import GraphDatabase
+
+            driver = GraphDatabase.driver(
+                NEO4J_URI,
+                auth=("neo4j", NEO4J_PASSWORD)
+            )
+
+            with driver.session(database=f"cognee_{self.project_id}") as session:
+                if entity_type:
+                    query = f"MATCH (n:{entity_type}) RETURN n LIMIT $limit"
+                else:
+                    query = "MATCH (n) RETURN n LIMIT $limit"
+
+                result = session.run(query, limit=limit)
+
+                entities = []
+                for record in result:
+                    node = record["n"]
+                    entities.append({
+                        "id": node.element_id,
+                        "labels": list(node.labels),
+                        "properties": dict(node)
+                    })
+
+            driver.close()
+            return entities
+
+        except Exception as e:
+            logger.error(f"❌ Failed to get entities: {e}")
+            return []
+
+    async def get_relationships(self, entity_id: Optional[str] = None, limit: int = 50) -> list[dict]:
+        """Get relationships from knowledge graph."""
+        if not self.initialized:
+            await self.initialize()
+
+        try:
+            from neo4j import GraphDatabase
+
+            driver = GraphDatabase.driver(
+                NEO4J_URI,
+                auth=("neo4j", NEO4J_PASSWORD)
+            )
+
+            with driver.session(database=f"cognee_{self.project_id}") as session:
+                if entity_id:
+                    query = """
+                    MATCH (a)-[r]->(b)
+                    WHERE elementId(a) = $entity_id OR elementId(b) = $entity_id
+                    RETURN a, r, b LIMIT $limit
+                    """
+                    result = session.run(query, entity_id=entity_id, limit=limit)
+                else:
+                    query = "MATCH (a)-[r]->(b) RETURN a, r, b LIMIT $limit"
+                    result = session.run(query, limit=limit)
+
+                relationships = []
+                for record in result:
+                    relationships.append({
+                        "from": {
+                            "id": record["a"].element_id,
+                            "labels": list(record["a"].labels),
+                            "name": dict(record["a"]).get("name", "unknown")
+                        },
+                        "relationship": {
+                            "type": record["r"].type,
+                            "properties": dict(record["r"])
+                        },
+                        "to": {
+                            "id": record["b"].element_id,
+                            "labels": list(record["b"].labels),
+                            "name": dict(record["b"]).get("name", "unknown")
+                        }
+                    })
+
+            driver.close()
+            return relationships
+
+        except Exception as e:
+            logger.error(f"❌ Failed to get relationships: {e}")
+            return []
 
 
 # ============================================
 # Knowledge Base Manager (FAISS + Ollama)
 # ============================================
 class KnowledgeBaseManager:
-    """Manages knowledge bases with FAISS indexes and Ollama embeddings."""
+    """Manages knowledge bases with FAISS indexes and Ollama embeddings.
+
+    Knowledge bases are SHARED across all users in a project.
+    """
 
     def __init__(self, project_id: str, kb_root: Path, index_dir: Path):
         self.project_id = project_id
@@ -171,7 +446,6 @@ class KnowledgeBaseManager:
 
     def _chunk_text(self, text: str, filename: str) -> list[str]:
         """Split text into chunks with overlap."""
-        # Simple chunking by paragraphs and size
         paragraphs = re.split(r'\n\n+', text)
         chunks = []
         current_chunk = []
@@ -185,9 +459,7 @@ class KnowledgeBaseManager:
             para_size = len(para)
 
             if current_size + para_size > KB_CHUNK_SIZE and current_chunk:
-                # Save current chunk
                 chunks.append("\n\n".join(current_chunk))
-                # Keep overlap
                 overlap_text = current_chunk[-1] if current_chunk else ""
                 current_chunk = [overlap_text] if len(overlap_text) < KB_CHUNK_OVERLAP else []
                 current_size = len(overlap_text) if current_chunk else 0
@@ -228,10 +500,8 @@ class KnowledgeBaseManager:
         try:
             import faiss
 
-            # Ensure index is loaded
             if kb_name not in self.indexes:
                 if not await self.load_index(kb_name):
-                    # Try to create index
                     if not await self.create_index(kb_name):
                         return []
 
@@ -241,12 +511,10 @@ class KnowledgeBaseManager:
             if index is None or not docs:
                 return []
 
-            # Get query embedding
             query_embedding = await self.get_embedding(query)
             query_embedding = query_embedding.reshape(1, -1)
             faiss.normalize_L2(query_embedding)
 
-            # Search
             k = min(top_k, len(docs))
             scores, indices = index.search(query_embedding, k)
 
@@ -285,7 +553,6 @@ class KnowledgeBaseManager:
             kb_path = self.kb_root / kb_name
             kb_path.mkdir(parents=True, exist_ok=True)
 
-            # Ensure .md extension
             if not filename.endswith(".md"):
                 filename += ".md"
 
@@ -293,8 +560,6 @@ class KnowledgeBaseManager:
             file_path.write_text(content, encoding="utf-8")
 
             logger.info(f"📝 Added document: {file_path}")
-
-            # Reindex
             await self.create_index(kb_name)
             return True
 
@@ -309,6 +574,7 @@ class KnowledgeBaseManager:
 
         stats = {
             "name": kb_name,
+            "project": self.project_id,
             "exists": kb_path.exists(),
             "indexed": index_path.exists(),
             "files": 0,
@@ -359,73 +625,84 @@ async def mem0_request(method: str, endpoint: str, **kwargs) -> dict:
 
 
 # ============================================
-# MCP Tools: Memory (via Mem0)
+# MCP Tools: Memory (via Mem0) - PER USER
 # ============================================
 @mcp.tool()
-async def memory_add(content: str, metadata: Optional[str] = None) -> str:
+async def memory_add(content: str, user_id: Optional[str] = None, metadata: Optional[str] = None) -> str:
     """
-    Add a memory to persistent storage.
+    Add a memory to persistent storage for a specific user.
 
     Args:
         content: The memory content to store
+        user_id: User identifier for isolation (default: 'default'). Each user has their own memory space.
         metadata: Optional JSON metadata string
 
     Returns:
         Confirmation message with memory ID
     """
     try:
-        data = {"text": content, "user_id": PROJECT_ID}
+        full_user_id = get_full_user_id(user_id)
+        # Mem0 API requires messages format
+        data = {
+            "messages": [{"role": "user", "content": content}],
+            "user_id": full_user_id
+        }
         if metadata:
             data["metadata"] = json.loads(metadata)
 
         result = await mem0_request("POST", "/memories", json=data)
-        return f"✅ Memory added: {result.get('id', 'unknown')}"
+        return f"✅ Memory added for user '{user_id or DEFAULT_USER_ID}': {result.get('id', 'unknown')}"
     except Exception as e:
         return f"❌ Failed to add memory: {e}"
 
 
 @mcp.tool()
-async def memory_search(query: str, limit: int = 10) -> str:
+async def memory_search(query: str, user_id: Optional[str] = None, limit: int = 10) -> str:
     """
-    Search memories using semantic similarity.
+    Search memories using semantic similarity for a specific user.
 
     Args:
         query: Search query
+        user_id: User identifier (default: 'default'). Searches only this user's memories.
         limit: Maximum results (default: 10)
 
     Returns:
         JSON string with matching memories
     """
     try:
+        full_user_id = get_full_user_id(user_id)
+        # Mem0 API uses /search endpoint
         result = await mem0_request(
             "POST",
-            "/memories/search",
-            json={"query": query, "user_id": PROJECT_ID, "limit": limit}
+            "/search",
+            json={"query": query, "user_id": full_user_id}
         )
-        memories = result.get("memories", [])
+        memories = result.get("results", [])
         return json.dumps(memories, indent=2, ensure_ascii=False)
     except Exception as e:
         return f"❌ Search failed: {e}"
 
 
 @mcp.tool()
-async def memory_get_all(limit: int = 100) -> str:
+async def memory_get_all(user_id: Optional[str] = None, limit: int = 100) -> str:
     """
-    Get all memories for current project.
+    Get all memories for a specific user.
 
     Args:
+        user_id: User identifier (default: 'default'). Gets only this user's memories.
         limit: Maximum memories to return
 
     Returns:
         JSON string with all memories
     """
     try:
+        full_user_id = get_full_user_id(user_id)
         result = await mem0_request(
             "GET",
             "/memories",
-            params={"user_id": PROJECT_ID, "limit": limit}
+            params={"user_id": full_user_id}
         )
-        memories = result.get("memories", [])
+        memories = result.get("results", [])
         return json.dumps(memories, indent=2, ensure_ascii=False)
     except Exception as e:
         return f"❌ Failed to get memories: {e}"
@@ -449,13 +726,34 @@ async def memory_delete(memory_id: str) -> str:
         return f"❌ Failed to delete: {e}"
 
 
+@mcp.tool()
+async def memory_get_users() -> str:
+    """
+    List all users who have memories in this project.
+
+    Returns:
+        JSON string with list of user IDs (without project prefix)
+    """
+    try:
+        # This would need to be implemented in Mem0 API
+        # For now, return a placeholder
+        return json.dumps({
+            "project": PROJECT_ID,
+            "note": "User listing requires Mem0 API extension",
+            "default_user": DEFAULT_USER_ID
+        }, indent=2)
+    except Exception as e:
+        return f"❌ Failed to get users: {e}"
+
+
 # ============================================
-# MCP Tools: Knowledge Base
+# MCP Tools: Knowledge Base - SHARED PER PROJECT
 # ============================================
 @mcp.tool()
 async def kb_search(knowledge_base: str, query: str, limit: int = 5) -> str:
     """
     Search knowledge base using semantic similarity.
+    Knowledge bases are SHARED across all users in the project.
 
     Args:
         knowledge_base: Name of the knowledge base to search
@@ -483,7 +781,8 @@ async def kb_search(knowledge_base: str, query: str, limit: int = 5) -> str:
 @mcp.tool()
 async def kb_list() -> str:
     """
-    List all available knowledge bases.
+    List all available knowledge bases in this project.
+    Knowledge bases are SHARED across all users in the project.
 
     Returns:
         JSON string with knowledge base information
@@ -498,7 +797,11 @@ async def kb_list() -> str:
         if not kbs:
             return f"No knowledge bases found for project '{PROJECT_ID}'"
 
-        return json.dumps(kbs, indent=2, ensure_ascii=False)
+        return json.dumps({
+            "project": PROJECT_ID,
+            "knowledge_bases": kbs,
+            "note": "Knowledge bases are shared across all users in this project"
+        }, indent=2, ensure_ascii=False)
     except Exception as e:
         return f"❌ Failed to list: {e}"
 
@@ -506,7 +809,7 @@ async def kb_list() -> str:
 @mcp.tool()
 async def kb_add(knowledge_base: str, filename: str, content: str) -> str:
     """
-    Add a document to a knowledge base.
+    Add a document to a knowledge base (shared across all project users).
 
     Args:
         knowledge_base: Name of the knowledge base
@@ -524,7 +827,7 @@ async def kb_add(knowledge_base: str, filename: str, content: str) -> str:
     try:
         success = await kb_manager.add_document(knowledge_base, filename, content)
         if success:
-            return f"✅ Document '{filename}' added to '{knowledge_base}' and reindexed"
+            return f"✅ Document '{filename}' added to '{knowledge_base}' (project: {PROJECT_ID}) and reindexed"
         return f"❌ Failed to add document"
     except Exception as e:
         return f"❌ Failed to add document: {e}"
@@ -580,16 +883,198 @@ async def kb_stats(knowledge_base: str) -> str:
 
 
 # ============================================
+# MCP Tools: Cognee (Knowledge Graph) - SHARED PER PROJECT
+# ============================================
+@mcp.tool()
+async def cognee_add(content: str, source: str = "manual") -> str:
+    """
+    Add content to Cognee knowledge graph for entity extraction and relationship detection.
+    Knowledge graph is SHARED across all users in the project.
+
+    This will:
+    1. Extract entities (people, organizations, concepts, etc.)
+    2. Detect relationships between entities
+    3. Store in Neo4j knowledge graph
+
+    Args:
+        content: Text content to process
+        source: Source identifier for tracking (default: 'manual')
+
+    Returns:
+        Confirmation message with processing status
+    """
+    global cognee_manager
+
+    if not COGNEE_ENABLED:
+        return "❌ Cognee is disabled. Set COGNEE_ENABLED=true to enable."
+
+    if cognee_manager is None:
+        return "❌ Cognee manager not initialized"
+
+    try:
+        result = await cognee_manager.add_knowledge(content, source)
+        if "error" in result:
+            return f"❌ Cognee add failed: {result['error']}"
+        return f"✅ Content processed by Cognee: {result['message']}"
+    except Exception as e:
+        return f"❌ Cognee add failed: {e}"
+
+
+@mcp.tool()
+async def cognee_search(query: str, search_type: str = "insights") -> str:
+    """
+    Search Cognee knowledge graph using various search strategies.
+
+    Args:
+        query: Search query
+        search_type: Type of search:
+            - 'insights': Get high-level insights (default)
+            - 'chunks': Get relevant text chunks
+            - 'graph_completion': Complete graph patterns
+
+    Returns:
+        JSON string with search results
+    """
+    global cognee_manager
+
+    if not COGNEE_ENABLED:
+        return "❌ Cognee is disabled. Set COGNEE_ENABLED=true to enable."
+
+    if cognee_manager is None:
+        return "❌ Cognee manager not initialized"
+
+    try:
+        results = await cognee_manager.search(query, search_type)
+        if not results:
+            return f"No results found for query: {query}"
+        return json.dumps(results, indent=2, ensure_ascii=False)
+    except Exception as e:
+        return f"❌ Cognee search failed: {e}"
+
+
+@mcp.tool()
+async def cognee_graph_stats() -> str:
+    """
+    Get statistics about the Cognee knowledge graph.
+
+    Returns:
+        JSON string with graph statistics (nodes, relationships, types)
+    """
+    global cognee_manager
+
+    if not COGNEE_ENABLED:
+        return "❌ Cognee is disabled. Set COGNEE_ENABLED=true to enable."
+
+    if cognee_manager is None:
+        return "❌ Cognee manager not initialized"
+
+    try:
+        stats = await cognee_manager.get_graph_stats()
+        return json.dumps(stats, indent=2, ensure_ascii=False)
+    except Exception as e:
+        return f"❌ Failed to get graph stats: {e}"
+
+
+@mcp.tool()
+async def cognee_get_entities(entity_type: Optional[str] = None, limit: int = 50) -> str:
+    """
+    Get entities from the knowledge graph.
+
+    Args:
+        entity_type: Filter by entity type (e.g., 'Person', 'Organization', 'Concept')
+        limit: Maximum entities to return (default: 50)
+
+    Returns:
+        JSON string with entities
+    """
+    global cognee_manager
+
+    if not COGNEE_ENABLED:
+        return "❌ Cognee is disabled. Set COGNEE_ENABLED=true to enable."
+
+    if cognee_manager is None:
+        return "❌ Cognee manager not initialized"
+
+    try:
+        entities = await cognee_manager.get_entities(entity_type, limit)
+        if not entities:
+            return "No entities found in knowledge graph"
+        return json.dumps(entities, indent=2, ensure_ascii=False)
+    except Exception as e:
+        return f"❌ Failed to get entities: {e}"
+
+
+@mcp.tool()
+async def cognee_get_relationships(entity_id: Optional[str] = None, limit: int = 50) -> str:
+    """
+    Get relationships from the knowledge graph.
+
+    Args:
+        entity_id: Filter by specific entity (get relationships for this entity)
+        limit: Maximum relationships to return (default: 50)
+
+    Returns:
+        JSON string with relationships (from -> type -> to)
+    """
+    global cognee_manager
+
+    if not COGNEE_ENABLED:
+        return "❌ Cognee is disabled. Set COGNEE_ENABLED=true to enable."
+
+    if cognee_manager is None:
+        return "❌ Cognee manager not initialized"
+
+    try:
+        relationships = await cognee_manager.get_relationships(entity_id, limit)
+        if not relationships:
+            return "No relationships found in knowledge graph"
+        return json.dumps(relationships, indent=2, ensure_ascii=False)
+    except Exception as e:
+        return f"❌ Failed to get relationships: {e}"
+
+
+# ============================================
+# MCP Tools: Info
+# ============================================
+@mcp.tool()
+async def get_project_info() -> str:
+    """
+    Get information about the current project and isolation model.
+
+    Returns:
+        JSON string with project configuration
+    """
+    return json.dumps({
+        "project_id": PROJECT_ID,
+        "isolation_model": {
+            "memory": "Per user - each user has private memories",
+            "knowledge_base": "Shared - all users in project share the same KB",
+            "cognee": "Shared - all users in project share the same knowledge graph"
+        },
+        "services": {
+            "mem0": MEM0_API_URL,
+            "ollama": OLLAMA_BASE_URL,
+            "cognee_enabled": COGNEE_ENABLED,
+            "neo4j": NEO4J_URI if COGNEE_ENABLED else "disabled"
+        },
+        "default_user_id": DEFAULT_USER_ID,
+        "usage": {
+            "memory_tools": "Pass user_id parameter to isolate memories per user",
+            "kb_tools": "Shared across all users - no user_id needed",
+            "cognee_tools": "Shared across all users - knowledge graph for entity relationships"
+        }
+    }, indent=2, ensure_ascii=False)
+
+
+# ============================================
 # Starlette Application
 # ============================================
 def create_starlette_app(mcp_server: Server, *, debug: bool = False) -> Starlette:
     """Create Starlette app with SSE and HTTP Stream transports."""
 
-    # Configure SSE transport
     sse = SseServerTransport("/messages/")
 
     class SSEApp:
-        """ASGI app wrapper for SSE endpoint."""
         async def __call__(self, scope, receive, send):
             if scope["type"] == "http":
                 logger.info("📡 New SSE connection")
@@ -603,7 +1088,6 @@ def create_starlette_app(mcp_server: Server, *, debug: bool = False) -> Starlett
     sse_app = SSEApp()
 
     class HTTPStreamApp:
-        """ASGI app wrapper for HTTP Stream endpoint."""
         def __init__(self, streamable_app):
             self.streamable_app = streamable_app
 
@@ -613,46 +1097,51 @@ def create_starlette_app(mcp_server: Server, *, debug: bool = False) -> Starlett
             await self.streamable_app(scope, receive, send)
 
     async def health_check(request: Request) -> JSONResponse:
-        """Health check endpoint."""
         return JSONResponse({
             "status": "healthy",
             "service": f"unified-{PROJECT_ID}",
             "project_id": PROJECT_ID,
             "mem0_url": MEM0_API_URL,
             "cognee_enabled": COGNEE_ENABLED,
+            "isolation": {
+                "memory": "per_user",
+                "knowledge_base": "shared_per_project",
+                "cognee": "shared_per_project" if COGNEE_ENABLED else "disabled"
+            }
         })
 
     @asynccontextmanager
     async def lifespan(app):
-        """Initialize resources."""
-        global http_client, kb_manager
+        global http_client, kb_manager, cognee_manager
 
         logger.info(f"🚀 Starting Unified MCP for project '{PROJECT_ID}'")
 
-        # Initialize HTTP client for Mem0
         http_client = httpx.AsyncClient(base_url=MEM0_API_URL, timeout=60.0)
         logger.info(f"✅ HTTP client initialized: {MEM0_API_URL}")
 
-        # Initialize Knowledge Base Manager
         kb_manager = KnowledgeBaseManager(PROJECT_ID, KNOWLEDGE_BASES_ROOT, FAISS_INDEX_DIR)
         logger.info("✅ Knowledge Base manager initialized")
 
-        # Pre-load existing indexes
         for kb in kb_manager.list_knowledge_bases():
             await kb_manager.load_index(kb["name"])
 
-        # Start FastMCP session manager
+        # Initialize Cognee if enabled
+        if COGNEE_ENABLED:
+            cognee_manager = CogneeManager(PROJECT_ID)
+            await cognee_manager.initialize()
+            logger.info("✅ Cognee manager initialized")
+        else:
+            logger.info("ℹ️ Cognee is disabled")
+
         logger.info("Starting FastMCP session manager...")
         async with mcp.session_manager.run():
             logger.info("✅ FastMCP session manager started")
             yield
             logger.info("Shutting down...")
 
-        # Cleanup
         await http_client.aclose()
         logger.info("✅ Cleanup complete")
 
-    # Configure FastMCP for Streamable HTTP
     mcp.settings.streamable_http_path = "/"
     http_stream_base_app = mcp.streamable_http_app()
     http_stream_app = HTTPStreamApp(http_stream_base_app)
@@ -682,8 +1171,8 @@ if __name__ == "__main__":
     logger.info(f"   Mem0: {MEM0_API_URL}")
     logger.info(f"   KB: {KNOWLEDGE_BASES_ROOT}/{PROJECT_ID}")
     logger.info(f"   Cognee: {'enabled' if COGNEE_ENABLED else 'disabled'}")
+    logger.info(f"   Isolation: Memory=per_user, KB=shared, Cognee=shared")
 
-    # Create Starlette app with proper session management
     mcp_server = mcp._mcp_server
     starlette_app = create_starlette_app(mcp_server, debug=True)
 
