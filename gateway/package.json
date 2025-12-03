@@ -1,0 +1,14 @@
+{
+  "name": "mcp-gateway",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "server.mjs",
+  "scripts": {
+    "start": "node server.mjs"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "eventsource": "^2.0.2",
+    "uuid": "^9.0.0"
+  }
+}

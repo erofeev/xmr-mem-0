@@ -15,12 +15,40 @@ services:
       - ./nginx/api-keys-terra.conf:/etc/nginx/api-keys-terra.conf:ro
       - ./nginx/api-keys-sport.conf:/etc/nginx/api-keys-sport.conf:ro
     depends_on:
+      gateway:
+        condition: service_healthy
+    networks:
+      - mcp_network
+
+  # ============================================
+  # MCP GATEWAY (API key via URL param)
+  # ============================================
+  gateway:
+    build:
+      context: ./gateway
+      dockerfile: Dockerfile
+    container_name: mcp-gateway
+    restart: unless-stopped
+    networks:
+      - mcp_network
+    volumes:
+      - ./nginx/api-keys-terra.conf:/etc/nginx/api-keys-terra.conf:ro
+      - ./nginx/api-keys-sport.conf:/etc/nginx/api-keys-sport.conf:ro
+    depends_on:
       mcp-terra:
         condition: service_healthy
       mcp-sport:
         condition: service_healthy
-    networks:
-      - mcp_network
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:3000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          memory: 256M
 
   # ============================================
   # PROJECT TERRA (7 users)
