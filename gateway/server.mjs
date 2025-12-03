@@ -34,6 +34,10 @@ const validateKey = (key) => {
   return null;
 };
 
+// Get backend URL for project
+// Uses unified-${project} instead of mcp-${project}
+const getBackendUrl = (project) => `http://unified-${project}:8080`;
+
 // SSE endpoint - proxy to backend
 app.get("/sse/", async (req, res) => {
   const apiKey = req.query.key;
@@ -49,7 +53,7 @@ app.get("/sse/", async (req, res) => {
 
   console.log(`[SSE] ${project} - new connection`);
 
-  const backendUrl = `http://mcp-${project}:8080/sse/`;
+  const backendUrl = `${getBackendUrl(project)}/sse/`;
   
   try {
     const response = await fetch(backendUrl, {
@@ -123,7 +127,7 @@ app.post("/sse/messages/", async (req, res) => {
   }
 
   const targetProject = project || "terra";
-  const backendUrl = `http://mcp-${targetProject}:8080/sse/messages/?session_id=${sessionId}`;
+  const backendUrl = `${getBackendUrl(targetProject)}/sse/messages/?session_id=${sessionId}`;
   
   console.log(`[POST] ${targetProject} - session ${sessionId}`);
 
@@ -169,10 +173,10 @@ app.get("/health", (req, res) => {
 });
 
 app.get("/", (req, res) => {
-  res.json({ message: "MCP Gateway", usage: "/sse/?key=API_KEY" });
+  res.json({ message: "MCP Gateway (Unified)", usage: "/sse/?key=API_KEY" });
 });
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`MCP Gateway running on port ${PORT}`);
+  console.log(`MCP Gateway (Unified) running on port ${PORT}`);
 });
