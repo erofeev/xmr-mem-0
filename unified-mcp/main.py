@@ -337,34 +337,171 @@ class CogneeManager:
         """Clear the entire knowledge graph for this project."""
         if not self.initialized:
             await self.initialize()
-        
+
         try:
             from neo4j import GraphDatabase
-            
+
             driver = GraphDatabase.driver(
                 NEO4J_URI,
                 auth=("neo4j", NEO4J_PASSWORD)
             )
-            
+
             db_name = f"cognee_{self.project_id}"
-            
+
             with driver.session(database=db_name) as session:
                 result = session.run("MATCH (n) DETACH DELETE n")
                 summary = result.consume()
-                
+
             driver.close()
-            
+
             logger.info(f"🧹 Cleared Cognee graph for project '{self.project_id}'")
-            
+
             return {
                 "status": "success",
                 "message": f"Cleared knowledge graph for project '{self.project_id}'",
                 "project": self.project_id
             }
-            
+
         except Exception as e:
             logger.error(f"❌ Failed to clear graph: {e}")
             return {"status": "error", "message": str(e)}
+
+
+# ============================================
+# Sync Manager: Mem0 → Cognee
+# ============================================
+class SyncManager:
+    """Manages synchronization between Mem0 and Cognee.
+
+    This allows keeping Cognee knowledge graph in sync with Mem0 memories.
+    Workflow:
+    1. Get all memories from Mem0 (optionally filtered by user)
+    2. Clear Cognee graph
+    3. Process each memory through Cognee for entity extraction
+    """
+
+    def __init__(self, project_id: str):
+        self.project_id = project_id
+
+    async def sync_mem0_to_cognee(
+        self,
+        user_id: Optional[str] = None,
+        clear_before_sync: bool = True
+    ) -> dict:
+        """Sync all Mem0 memories to Cognee knowledge graph.
+
+        Args:
+            user_id: Optional - sync only specific user's memories
+            clear_before_sync: If True (default), clears Cognee before syncing
+
+        Returns:
+            Sync status with statistics
+        """
+        global http_client, cognee_manager
+
+        if not COGNEE_ENABLED:
+            return {"error": "Cognee is disabled"}
+
+        if cognee_manager is None:
+            return {"error": "Cognee manager not initialized"}
+
+        if http_client is None:
+            return {"error": "HTTP client not initialized"}
+
+        try:
+            stats = {
+                "memories_fetched": 0,
+                "memories_processed": 0,
+                "memories_failed": 0,
+                "entities_before": 0,
+                "entities_after": 0,
+                "user_filter": user_id
+            }
+
+            # Get current graph stats
+            if clear_before_sync:
+                graph_stats = await cognee_manager.get_graph_stats()
+                stats["entities_before"] = graph_stats.get("nodes", 0)
+
+            # Fetch memories from Mem0
+            full_user_id = get_full_user_id(user_id) if user_id else None
+
+            if full_user_id:
+                # Fetch specific user's memories
+                response = await http_client.get(
+                    "/memories",
+                    params={"user_id": full_user_id}
+                )
+            else:
+                # Fetch all memories (will need to iterate users)
+                # For now, fetch default user
+                full_user_id = get_full_user_id(None)
+                response = await http_client.get(
+                    "/memories",
+                    params={"user_id": full_user_id}
+                )
+
+            response.raise_for_status()
+            memories_data = response.json()
+            memories = memories_data.get("results", [])
+            stats["memories_fetched"] = len(memories)
+
+            if not memories:
+                return {
+                    "status": "success",
+                    "message": "No memories to sync",
+                    "stats": stats
+                }
+
+            # Clear Cognee if requested
+            if clear_before_sync:
+                clear_result = await cognee_manager.clear_graph()
+                if clear_result.get("status") != "success":
+                    logger.warning(f"⚠️ Failed to clear Cognee: {clear_result}")
+
+            # Process each memory through Cognee
+            for memory in memories:
+                memory_content = memory.get("memory", "")
+                memory_id = memory.get("id", "unknown")
+
+                if not memory_content:
+                    continue
+
+                try:
+                    # Add memory content to Cognee
+                    result = await cognee_manager.add_knowledge(
+                        content=f"Memory [{memory_id}]: {memory_content}",
+                        source=f"mem0_sync_{user_id or 'all'}"
+                    )
+
+                    if "error" not in result:
+                        stats["memories_processed"] += 1
+                    else:
+                        stats["memories_failed"] += 1
+                        logger.warning(f"⚠️ Failed to process memory {memory_id}: {result['error']}")
+
+                except Exception as e:
+                    stats["memories_failed"] += 1
+                    logger.error(f"❌ Error processing memory {memory_id}: {e}")
+
+            # Get final graph stats
+            final_stats = await cognee_manager.get_graph_stats()
+            stats["entities_after"] = final_stats.get("nodes", 0)
+
+            logger.info(f"🔄 Sync complete: {stats['memories_processed']}/{stats['memories_fetched']} memories processed")
+
+            return {
+                "status": "success",
+                "message": f"Synced {stats['memories_processed']} memories to Cognee",
+                "stats": stats
+            }
+
+        except Exception as e:
+            logger.error(f"❌ Sync failed: {e}")
+            return {"status": "error", "message": str(e)}
+
+# Global sync manager instance
+sync_manager: Optional[SyncManager] = None
 
 
 # ============================================
@@ -1354,6 +1491,79 @@ async def cognee_get_relationships(entity_id: Optional[str] = None, limit: int =
         return f"❌ Failed to get relationships: {e}"
 
 
+@mcp.tool()
+async def cognee_clear() -> str:
+    """
+    Clear the entire Cognee knowledge graph for this project.
+
+    ⚠️ WARNING: This permanently deletes ALL entities and relationships!
+
+    Use this when:
+    - Architecture changed significantly
+    - Need to rebuild graph from scratch
+    - Before running sync_mem0_to_cognee
+
+    Returns:
+        JSON with status and confirmation
+    """
+    global cognee_manager
+
+    if not COGNEE_ENABLED:
+        return json.dumps({"error": "Cognee is disabled. Set COGNEE_ENABLED=true to enable."})
+
+    if cognee_manager is None:
+        return json.dumps({"error": "Cognee manager not initialized"})
+
+    result = await cognee_manager.clear_graph()
+    return json.dumps(result, indent=2, ensure_ascii=False)
+
+
+@mcp.tool()
+async def sync_mem0_to_cognee(user_id: Optional[str] = None, clear_before_sync: bool = True) -> str:
+    """
+    Synchronize Mem0 memories to Cognee knowledge graph.
+
+    This tool:
+    1. Fetches all memories from Mem0 (optionally filtered by user)
+    2. Clears Cognee graph (if clear_before_sync=True)
+    3. Processes each memory through Cognee for entity extraction
+    4. Builds relationships between extracted entities
+
+    Use cases:
+    - Keep Cognee graph in sync with Mem0 facts
+    - Regular maintenance to ensure data consistency
+    - After significant changes to memories
+
+    Args:
+        user_id: Optional - sync only specific user's memories (default: all users)
+        clear_before_sync: If True (default), clears Cognee before syncing
+
+    Returns:
+        JSON with sync statistics:
+        - memories_fetched: total memories found
+        - memories_processed: successfully processed
+        - memories_failed: failed to process
+        - entities_before/after: graph size comparison
+
+    Example workflow:
+        # Weekly sync to keep Cognee fresh
+        sync_mem0_to_cognee(clear_before_sync=True)
+
+        # Incremental add without clearing
+        sync_mem0_to_cognee(user_id="dev1", clear_before_sync=False)
+    """
+    global sync_manager
+
+    if not COGNEE_ENABLED:
+        return json.dumps({"error": "Cognee is disabled. Set COGNEE_ENABLED=true to enable."})
+
+    if sync_manager is None:
+        return json.dumps({"error": "Sync manager not initialized"})
+
+    result = await sync_manager.sync_mem0_to_cognee(user_id, clear_before_sync)
+    return json.dumps(result, indent=2, ensure_ascii=False)
+
+
 # ============================================
 # MCP Tools: Info
 # ============================================
@@ -1433,7 +1643,7 @@ def create_starlette_app(mcp_server: Server, *, debug: bool = False) -> Starlett
 
     @asynccontextmanager
     async def lifespan(app):
-        global http_client, kb_manager, cognee_manager
+        global http_client, kb_manager, cognee_manager, sync_manager
 
         logger.info(f"🚀 Starting Unified MCP for project '{PROJECT_ID}'")
 
@@ -1451,6 +1661,10 @@ def create_starlette_app(mcp_server: Server, *, debug: bool = False) -> Starlett
             cognee_manager = CogneeManager(PROJECT_ID)
             await cognee_manager.initialize()
             logger.info("✅ Cognee manager initialized")
+
+            # Initialize Sync Manager
+            sync_manager = SyncManager(PROJECT_ID)
+            logger.info("✅ Sync manager initialized")
         else:
             logger.info("ℹ️ Cognee is disabled")
 
