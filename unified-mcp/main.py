@@ -816,14 +816,16 @@ if __name__ == "__main__":
         yield
         await shutdown()
 
+    # FastMCP sse_app уже имеет routes: /sse и /messages
+    # Монтируем его на корень
     sse_app = mcp.sse_app()
 
     app = Starlette(
         routes=[
             Route("/", health),
             Route("/health", health),
-            Mount("/sse", app=sse_app),
-            Mount("/messages", app=sse_app),
+            # Монтируем SSE app на корень - он сам имеет /sse и /messages
+            Mount("/", app=sse_app),
         ],
         lifespan=lifespan
     )
