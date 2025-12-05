@@ -1,15 +1,17 @@
-# Unified MCP Server Dependencies
+# MCP Server
 mcp>=1.0.0
 fastmcp>=0.1.0
+
+# HTTP Client
 httpx>=0.25.0
+
+# Vector Search
 numpy>=1.24.0
 faiss-cpu>=1.7.4
-langchain>=0.1.0
-langchain-text-splitters>=0.0.1
-python-dotenv>=1.0.0
-uvicorn>=0.24.0
 
-# Cognee - Knowledge Graph
-cognee>=0.4.0
-neo4j>=5.0.0
-transformers>=4.30.0
+# Environment
+python-dotenv>=1.0.0
+
+# Server
+uvicorn>=0.24.0
+starlette>=0.27.0
