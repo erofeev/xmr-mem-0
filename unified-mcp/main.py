@@ -16,7 +16,7 @@ from typing import Any, Optional, List, Dict
 import httpx
 import numpy as np
 from dotenv import load_dotenv
-from mcp.server.fastmcp import FastMCP
+from fastmcp import FastMCP
 
 load_dotenv()
 
@@ -806,28 +806,36 @@ if __name__ == "__main__":
     from starlette.applications import Starlette
     from starlette.routing import Route, Mount
     from starlette.responses import JSONResponse
+    from starlette.middleware import Middleware
+    from starlette.middleware.base import BaseHTTPMiddleware
 
     async def health(request):
         return JSONResponse({"status": "healthy", "project": PROJECT_ID})
 
+    # Создаём http_app с указанием path
+    http_app = mcp.http_app(path="/mcp")
+    
+    # Создаём обёртку для lifespan чтобы добавить наш startup/shutdown
+    original_lifespan = http_app.lifespan
+    
     @asynccontextmanager
-    async def lifespan(app):
+    async def combined_lifespan(app):
+        # Наш startup ДО FastMCP
         await startup()
-        yield
+        # Оригинальный lifespan FastMCP
+        async with original_lifespan(app):
+            yield
+        # Наш shutdown ПОСЛЕ FastMCP
         await shutdown()
-
-    # FastMCP sse_app уже имеет routes: /sse и /messages
-    # Монтируем его на корень
-    sse_app = mcp.sse_app()
 
     app = Starlette(
         routes=[
             Route("/", health),
             Route("/health", health),
-            # Монтируем SSE app на корень - он сам имеет /sse и /messages
-            Mount("/", app=sse_app),
+            # Монтируем на корень, http_app уже имеет /mcp внутри
+            Mount("/", app=http_app),
         ],
-        lifespan=lifespan
+        lifespan=combined_lifespan
     )
 
     uvicorn.run(app, host="0.0.0.0", port=MCP_PORT)
