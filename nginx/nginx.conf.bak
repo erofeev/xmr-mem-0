@@ -1,0 +1,185 @@
+events {
+    worker_connections 1024;
+}
+
+http {
+    map_hash_bucket_size 128;
+
+    # API Key maps for all projects
+    map $arg_key $terra_valid {
+        default 0;
+        include /etc/nginx/api-keys-terra.conf;
+    }
+
+    map $arg_key $sport_valid {
+        default 0;
+        include /etc/nginx/api-keys-sport.conf;
+    }
+
+    map $arg_key $datashowcase_valid {
+        default 0;
+        include /etc/nginx/api-keys-datashowcase.conf;
+    }
+
+    map $arg_key $trialprj_valid {
+        default 0;
+        include /etc/nginx/api-keys-trialprj.conf;
+    }
+
+    server {
+        listen 80;
+        server_name _;
+
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+        proxy_set_header Host $host;
+        proxy_buffering off;
+        proxy_cache off;
+        chunked_transfer_encoding off;
+        proxy_read_timeout 86400s;
+        proxy_send_timeout 86400s;
+
+        # ============================================
+        # TERRA PROJECT
+        # ============================================
+        location = /terra/sse {
+            if ($terra_valid = 0) { return 401; }
+            proxy_pass http://unified-terra:8080/sse;
+            proxy_set_header Accept-Encoding "";
+        }
+
+        location /terra/sse/ {
+            if ($terra_valid = 0) { return 401; }
+            proxy_pass http://unified-terra:8080/sse/;
+            proxy_set_header Accept-Encoding "";
+        }
+
+        location /terra/messages {
+            proxy_pass http://unified-terra:8080/messages;
+            proxy_set_header Content-Type application/json;
+        }
+
+        location /terra/messages/ {
+            proxy_pass http://unified-terra:8080/messages/;
+            proxy_set_header Content-Type application/json;
+        }
+
+        location /terra/health {
+            proxy_pass http://unified-terra:8080/;
+        }
+
+        # ============================================
+        # SPORT PROJECT
+        # ============================================
+        location = /sport/sse {
+            if ($sport_valid = 0) { return 401; }
+            proxy_pass http://unified-sport:8080/sse;
+            proxy_set_header Accept-Encoding "";
+        }
+
+        location /sport/sse/ {
+            if ($sport_valid = 0) { return 401; }
+            proxy_pass http://unified-sport:8080/sse/;
+            proxy_set_header Accept-Encoding "";
+        }
+
+        location /sport/messages {
+            proxy_pass http://unified-sport:8080/messages;
+            proxy_set_header Content-Type application/json;
+        }
+
+        location /sport/messages/ {
+            proxy_pass http://unified-sport:8080/messages/;
+            proxy_set_header Content-Type application/json;
+        }
+
+        location /sport/health {
+            proxy_pass http://unified-sport:8080/;
+        }
+
+        # ============================================
+        # DATASHOWCASE PROJECT
+        # ============================================
+        location = /datashowcase/sse {
+            if ($datashowcase_valid = 0) { return 401; }
+            proxy_pass http://unified-datashowcase:8080/sse;
+            proxy_set_header Accept-Encoding "";
+        }
+
+        location /datashowcase/sse/ {
+            if ($datashowcase_valid = 0) { return 401; }
+            proxy_pass http://unified-datashowcase:8080/sse/;
+            proxy_set_header Accept-Encoding "";
+        }
+
+        location /datashowcase/messages {
+            proxy_pass http://unified-datashowcase:8080/messages;
+            proxy_set_header Content-Type application/json;
+        }
+
+        location /datashowcase/messages/ {
+            proxy_pass http://unified-datashowcase:8080/messages/;
+            proxy_set_header Content-Type application/json;
+        }
+
+        location /datashowcase/health {
+            proxy_pass http://unified-datashowcase:8080/;
+        }
+
+        # ============================================
+        # TRIALPRJ PROJECT
+        # ============================================
+        location = /trialprj/sse {
+            if ($trialprj_valid = 0) { return 401; }
+            proxy_pass http://unified-trialprj:8080/sse;
+            proxy_set_header Accept-Encoding "";
+        }
+
+        location /trialprj/sse/ {
+            if ($trialprj_valid = 0) { return 401; }
+            proxy_pass http://unified-trialprj:8080/sse/;
+            proxy_set_header Accept-Encoding "";
+        }
+
+        location /trialprj/messages {
+            proxy_pass http://unified-trialprj:8080/messages;
+            proxy_set_header Content-Type application/json;
+        }
+
+        location /trialprj/messages/ {
+            proxy_pass http://unified-trialprj:8080/messages/;
+            proxy_set_header Content-Type application/json;
+        }
+
+        location /trialprj/health {
+            proxy_pass http://unified-trialprj:8080/;
+        }
+
+        # ============================================
+        # MCP GATEWAY (legacy)
+        # ============================================
+        location /mcp/ {
+            proxy_pass http://gateway:3000/;
+            proxy_set_header Accept-Encoding "";
+        }
+
+        location /mcp/health {
+            proxy_pass http://gateway:3000/health;
+        }
+
+        # Root
+        location / {
+            return 200 'MCP Team Memory Server
+
+Projects (SSE transport):
+- /terra/sse?key=API_KEY
+- /sport/sse?key=API_KEY  
+- /datashowcase/sse?key=API_KEY
+- /trialprj/sse?key=API_KEY
+
+Key format: {project}_{user}_{hash}
+Example: terra_user00_abc123...';
+            add_header Content-Type text/plain;
+        }
+    }
+}

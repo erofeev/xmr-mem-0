@@ -310,7 +310,7 @@ async def mem0_add(content: str, user_id: str = None, metadata: str = None) -> s
         except:
             pass
     try:
-        response = await http_client.post(f"{MEM0_API_URL}/v1/memories/", json=payload)
+        response = await http_client.post(f"{MEM0_API_URL}/memories", json=payload)
         return json.dumps(response.json(), ensure_ascii=False, indent=2)
     except Exception as e:
         return json.dumps({"error": str(e)})
@@ -322,7 +322,7 @@ async def mem0_search(query: str, user_id: str = None, limit: int = 10) -> str:
     full_user_id = get_full_user_id(user_id)
     try:
         response = await http_client.post(
-            f"{MEM0_API_URL}/v1/memories/search/",
+            f"{MEM0_API_URL}/search",
             json={"query": query, "user_id": full_user_id, "limit": limit}
         )
         return json.dumps(response.json(), ensure_ascii=False, indent=2)
@@ -335,7 +335,7 @@ async def mem0_get_all(user_id: str = None) -> str:
     """Get all memories for user from Mem0."""
     full_user_id = get_full_user_id(user_id)
     try:
-        response = await http_client.get(f"{MEM0_API_URL}/v1/memories/", params={"user_id": full_user_id})
+        response = await http_client.get(f"{MEM0_API_URL}/memories", params={"user_id": full_user_id})
         return json.dumps(response.json(), ensure_ascii=False, indent=2)
     except Exception as e:
         return json.dumps({"error": str(e)})
@@ -348,7 +348,7 @@ async def mem0_get(memory_id: str, user_id: str = None) -> str:
     if user_id:
         params["user_id"] = get_full_user_id(user_id)
     try:
-        response = await http_client.get(f"{MEM0_API_URL}/v1/memories/{memory_id}", params=params)
+        response = await http_client.get(f"{MEM0_API_URL}/memories/{memory_id}", params=params)
         return json.dumps(response.json(), ensure_ascii=False, indent=2)
     except Exception as e:
         return json.dumps({"error": str(e)})
@@ -359,7 +359,7 @@ async def mem0_update(memory_id: str, content: str) -> str:
     """Update an existing memory."""
     try:
         response = await http_client.put(
-            f"{MEM0_API_URL}/v1/memories/{memory_id}",
+            f"{MEM0_API_URL}/memories/{memory_id}",
             json={"text": content}
         )
         return json.dumps(response.json(), ensure_ascii=False, indent=2)
@@ -371,7 +371,7 @@ async def mem0_update(memory_id: str, content: str) -> str:
 async def mem0_delete(memory_id: str) -> str:
     """Delete a specific memory by ID."""
     try:
-        response = await http_client.delete(f"{MEM0_API_URL}/v1/memories/{memory_id}")
+        response = await http_client.delete(f"{MEM0_API_URL}/memories/{memory_id}")
         return json.dumps(response.json(), ensure_ascii=False, indent=2)
     except Exception as e:
         return json.dumps({"error": str(e)})
@@ -384,7 +384,7 @@ async def mem0_delete_all(user_id: str = None) -> str:
     if user_id:
         params["user_id"] = get_full_user_id(user_id)
     try:
-        response = await http_client.delete(f"{MEM0_API_URL}/v1/memories/", params=params)
+        response = await http_client.delete(f"{MEM0_API_URL}/memories", params=params)
         return json.dumps(response.json(), ensure_ascii=False, indent=2)
     except Exception as e:
         return json.dumps({"error": str(e)})
@@ -394,7 +394,7 @@ async def mem0_delete_all(user_id: str = None) -> str:
 async def mem0_history(memory_id: str) -> str:
     """Get history of changes for a memory."""
     try:
-        response = await http_client.get(f"{MEM0_API_URL}/v1/memories/{memory_id}/history")
+        response = await http_client.get(f"{MEM0_API_URL}/memories/{memory_id}/history")
         return json.dumps(response.json(), ensure_ascii=False, indent=2)
     except Exception as e:
         return json.dumps({"error": str(e)})
@@ -406,7 +406,7 @@ async def mem0_enhanced_search(query: str, user_id: str = None, include_graph_co
     full_user_id = get_full_user_id(user_id)
     try:
         response = await http_client.post(
-            f"{MEM0_API_URL}/v1/search/enhanced",
+            f"{MEM0_API_URL}/search/enhanced",
             params={"include_graph_context": include_graph_context},
             json={"query": query, "user_id": full_user_id}
         )
@@ -421,7 +421,7 @@ async def mem0_graph_sync(memory_id: str, memory_text: str, user_id: str = None)
     full_user_id = get_full_user_id(user_id)
     try:
         response = await http_client.post(
-            f"{MEM0_API_URL}/v1/graph/sync",
+            f"{MEM0_API_URL}/graph/sync",
             json={"memory_id": memory_id, "memory_text": memory_text, "user_id": full_user_id}
         )
         return json.dumps(response.json(), ensure_ascii=False, indent=2)
@@ -434,7 +434,7 @@ async def mem0_graph_link(memory_id_1: str, memory_id_2: str, relationship_type:
     """Link two memories with a relationship in the graph."""
     try:
         response = await http_client.post(
-            f"{MEM0_API_URL}/v1/graph/link",
+            f"{MEM0_API_URL}/graph/link",
             json={"memory_id_1": memory_id_1, "memory_id_2": memory_id_2, "relationship_type": relationship_type}
         )
         return json.dumps(response.json(), ensure_ascii=False, indent=2)
@@ -447,7 +447,7 @@ async def mem0_graph_related(memory_id: str, max_depth: int = 2) -> str:
     """Get memories related to a specific memory in the graph."""
     try:
         response = await http_client.get(
-            f"{MEM0_API_URL}/v1/graph/related/{memory_id}",
+            f"{MEM0_API_URL}/graph/related/{memory_id}",
             params={"max_depth": max_depth}
         )
         return json.dumps(response.json(), ensure_ascii=False, indent=2)
@@ -460,7 +460,7 @@ async def mem0_graph_path(memory_id_1: str, memory_id_2: str) -> str:
     """Find the path between two memories in the graph."""
     try:
         response = await http_client.get(
-            f"{MEM0_API_URL}/v1/graph/path",
+            f"{MEM0_API_URL}/graph/path",
             params={"memory_id_1": memory_id_1, "memory_id_2": memory_id_2}
         )
         return json.dumps(response.json(), ensure_ascii=False, indent=2)
@@ -473,7 +473,7 @@ async def mem0_graph_evolution(topic: str, user_id: str = None) -> str:
     """Get the evolution of knowledge about a topic over time."""
     params = {"user_id": get_full_user_id(user_id)} if user_id else {}
     try:
-        response = await http_client.get(f"{MEM0_API_URL}/v1/graph/evolution/{topic}", params=params)
+        response = await http_client.get(f"{MEM0_API_URL}/graph/evolution/{topic}", params=params)
         return json.dumps(response.json(), ensure_ascii=False, indent=2)
     except Exception as e:
         return json.dumps({"error": str(e)})
@@ -484,7 +484,7 @@ async def mem0_graph_superseded(user_id: str = None) -> str:
     """Find obsolete/superseded memories that have been updated."""
     params = {"user_id": get_full_user_id(user_id)} if user_id else {}
     try:
-        response = await http_client.get(f"{MEM0_API_URL}/v1/graph/superseded", params=params)
+        response = await http_client.get(f"{MEM0_API_URL}/graph/superseded", params=params)
         return json.dumps(response.json(), ensure_ascii=False, indent=2)
     except Exception as e:
         return json.dumps({"error": str(e)})
@@ -494,7 +494,7 @@ async def mem0_graph_superseded(user_id: str = None) -> str:
 async def mem0_graph_thread(memory_id: str) -> str:
     """Get the conversation thread for a memory."""
     try:
-        response = await http_client.get(f"{MEM0_API_URL}/v1/graph/thread/{memory_id}")
+        response = await http_client.get(f"{MEM0_API_URL}/graph/thread/{memory_id}")
         return json.dumps(response.json(), ensure_ascii=False, indent=2)
     except Exception as e:
         return json.dumps({"error": str(e)})
@@ -505,7 +505,7 @@ async def mem0_graph_communities(user_id: str = None) -> str:
     """Detect memory communities/clusters in the graph."""
     params = {"user_id": get_full_user_id(user_id)} if user_id else {}
     try:
-        response = await http_client.get(f"{MEM0_API_URL}/v1/graph/communities", params=params)
+        response = await http_client.get(f"{MEM0_API_URL}/graph/communities", params=params)
         return json.dumps(response.json(), ensure_ascii=False, indent=2)
     except Exception as e:
         return json.dumps({"error": str(e)})
@@ -515,7 +515,7 @@ async def mem0_graph_communities(user_id: str = None) -> str:
 async def mem0_graph_trust_score(memory_id: str) -> str:
     """Calculate trust score for a memory based on validations and citations."""
     try:
-        response = await http_client.get(f"{MEM0_API_URL}/v1/graph/trust-score/{memory_id}")
+        response = await http_client.get(f"{MEM0_API_URL}/graph/trust-score/{memory_id}")
         return json.dumps(response.json(), ensure_ascii=False, indent=2)
     except Exception as e:
         return json.dumps({"error": str(e)})
@@ -526,7 +526,7 @@ async def mem0_graph_intelligence(user_id: str = None) -> str:
     """Get memory intelligence analysis - insights, patterns, and statistics."""
     params = {"user_id": get_full_user_id(user_id)} if user_id else {}
     try:
-        response = await http_client.get(f"{MEM0_API_URL}/v1/graph/intelligence", params=params)
+        response = await http_client.get(f"{MEM0_API_URL}/graph/intelligence", params=params)
         return json.dumps(response.json(), ensure_ascii=False, indent=2)
     except Exception as e:
         return json.dumps({"error": str(e)})
@@ -553,7 +553,7 @@ async def mem0_create_decision(text: str, user_id: str, pros: str = None, cons: 
         except:
             payload["alternatives"] = [alternatives]
     try:
-        response = await http_client.post(f"{MEM0_API_URL}/v1/graph/decision", json=payload)
+        response = await http_client.post(f"{MEM0_API_URL}/graph/decision", json=payload)
         return json.dumps(response.json(), ensure_ascii=False, indent=2)
     except Exception as e:
         return json.dumps({"error": str(e)})
@@ -563,7 +563,7 @@ async def mem0_create_decision(text: str, user_id: str, pros: str = None, cons: 
 async def mem0_get_decision(decision_id: str) -> str:
     """Get decision rationale and related memories."""
     try:
-        response = await http_client.get(f"{MEM0_API_URL}/v1/graph/decision/{decision_id}")
+        response = await http_client.get(f"{MEM0_API_URL}/graph/decision/{decision_id}")
         return json.dumps(response.json(), ensure_ascii=False, indent=2)
     except Exception as e:
         return json.dumps({"error": str(e)})
@@ -579,7 +579,7 @@ async def mem0_create_component(name: str, component_type: str = "Component", me
         except:
             pass
     try:
-        response = await http_client.post(f"{MEM0_API_URL}/v1/graph/component", json=payload)
+        response = await http_client.post(f"{MEM0_API_URL}/graph/component", json=payload)
         return json.dumps(response.json(), ensure_ascii=False, indent=2)
     except Exception as e:
         return json.dumps({"error": str(e)})
@@ -590,7 +590,7 @@ async def mem0_component_dependency(from_component: str, to_component: str) -> s
     """Link component dependency in the architecture graph."""
     try:
         response = await http_client.post(
-            f"{MEM0_API_URL}/v1/graph/component/dependency",
+            f"{MEM0_API_URL}/graph/component/dependency",
             json={"from_component": from_component, "to_component": to_component}
         )
         return json.dumps(response.json(), ensure_ascii=False, indent=2)
@@ -603,7 +603,7 @@ async def mem0_component_link_memory(component_name: str, memory_id: str) -> str
     """Link a memory to a component."""
     try:
         response = await http_client.post(
-            f"{MEM0_API_URL}/v1/graph/component/link-memory",
+            f"{MEM0_API_URL}/graph/component/link-memory",
             json={"component_name": component_name, "memory_id": memory_id}
         )
         return json.dumps(response.json(), ensure_ascii=False, indent=2)
@@ -615,7 +615,7 @@ async def mem0_component_link_memory(component_name: str, memory_id: str) -> str
 async def mem0_component_impact(component_name: str) -> str:
     """Analyze component impact - what depends on this component."""
     try:
-        response = await http_client.get(f"{MEM0_API_URL}/v1/graph/impact/{component_name}")
+        response = await http_client.get(f"{MEM0_API_URL}/graph/impact/{component_name}")
         return json.dumps(response.json(), ensure_ascii=False, indent=2)
     except Exception as e:
         return json.dumps({"error": str(e)})
