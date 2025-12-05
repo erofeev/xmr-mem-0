@@ -58,7 +58,7 @@ class GraphitiClient:
     
     def __init__(self, api_url: str, project_id: str):
         self.api_url = api_url.rstrip("/")
-        self.project_id = project_id  # Used as group_id for project isolation
+        self.project_id = project_id
         self.client: Optional[httpx.AsyncClient] = None
         self.initialized = False
     
@@ -87,30 +87,27 @@ class GraphitiClient:
             return {"error": str(e)}
     
     async def add_episode(self, content: str, name: str = None, source: str = "user") -> Dict:
-        """Add episode with project-specific group_id for isolation"""
         params = {
             "content": content, 
             "source": source, 
             "reference_time": datetime.now().isoformat(),
-            "group_id": self.project_id  # Project isolation
+            "group_id": self.project_id
         }
         if name:
             params["name"] = name
         return await self._call_mcp("tools/add_episode", params)
     
     async def search(self, query: str, num_results: int = 10) -> Dict:
-        """Search with project-specific group_ids filter"""
         return await self._call_mcp("tools/search", {
             "query": query, 
             "num_results": num_results,
-            "group_ids": [self.project_id]  # Search only in this project
+            "group_ids": [self.project_id]
         })
     
     async def get_episodes(self, last_n: int = 10) -> Dict:
-        """Get episodes filtered by project group_id"""
         return await self._call_mcp("tools/get_episodes", {
             "last_n": last_n,
-            "group_ids": [self.project_id]  # Filter by project
+            "group_ids": [self.project_id]
         })
 
 
@@ -151,82 +148,90 @@ class KnowledgeBaseManager:
             return self.embeddings_cache[cache_key]
         try:
             async with httpx.AsyncClient() as client:
-                response = await client.post(f"{OLLAMA_BASE_URL}/api/embeddings", json={"model": OLLAMA_EMBEDDING_MODEL, "prompt": text}, timeout=30.0)
-                if response.status_code == 200:
-                    embedding = np.array(response.json()["embedding"], dtype=np.float32)
-                    self.embeddings_cache[cache_key] = embedding
-                    return embedding
+                response = await client.post(
+                    f"{OLLAMA_BASE_URL}/api/embeddings",
+                    json={"model": OLLAMA_EMBEDDING_MODEL, "prompt": text},
+                    timeout=30.0
+                )
+                embedding = np.array(response.json()["embedding"], dtype=np.float32)
+                self.embeddings_cache[cache_key] = embedding
+                return embedding
         except Exception as e:
             logger.error(f"Embedding error: {e}")
-        return np.zeros(768, dtype=np.float32)
+            return np.zeros(768, dtype=np.float32)
     
     def _chunk_text(self, text: str) -> List[str]:
-        words = text.split()
         chunks = []
         start = 0
-        while start < len(words):
+        while start < len(text):
             end = start + KB_CHUNK_SIZE
-            chunks.append(" ".join(words[start:end]))
+            chunks.append(text[start:end])
             start = end - KB_CHUNK_OVERLAP
         return chunks
     
-    async def create_kb(self, name: str, description: str = "") -> Dict:
+    async def create_kb(self, name: str, documents: List[str]) -> Dict:
         import faiss
-        if name in self.indexes:
-            return {"error": f"KB '{name}' exists"}
-        self.indexes[name] = faiss.IndexFlatL2(768)
-        self.documents[name] = []
-        meta_file = self.index_dir / f"{name}.meta.json"
-        with open(meta_file, "w") as f:
-            json.dump({"name": name, "description": description, "created_at": datetime.now().isoformat()}, f)
-        return {"success": True, "name": name}
-    
-    async def add_document(self, kb_name: str, content: str, metadata: Dict = None) -> Dict:
-        import faiss
-        if kb_name not in self.indexes:
-            return {"error": f"KB '{kb_name}' not found"}
-        metadata = metadata or {}
-        chunks = self._chunk_text(content)
+        all_chunks = []
+        for doc in documents:
+            chunks = self._chunk_text(doc)
+            all_chunks.extend([{"text": c, "source": f"doc_{i}"} for i, c in enumerate(chunks)])
+        
+        if not all_chunks:
+            return {"error": "No chunks created"}
+        
         embeddings = []
-        for i, chunk in enumerate(chunks):
-            embedding = await self._get_embedding(chunk)
-            embeddings.append(embedding)
-            self.documents[kb_name].append({"content": chunk, "metadata": metadata, "chunk_index": i})
-        if embeddings:
-            self.indexes[kb_name].add(np.vstack(embeddings))
-            faiss.write_index(self.indexes[kb_name], str(self.index_dir / f"{kb_name}.index"))
-            with open(self.index_dir / f"{kb_name}.json", "w") as f:
-                json.dump(self.documents[kb_name], f)
-        return {"success": True, "chunks_added": len(chunks)}
+        for chunk in all_chunks:
+            emb = await self._get_embedding(chunk["text"])
+            embeddings.append(emb)
+        
+        embeddings_np = np.array(embeddings, dtype=np.float32)
+        index = faiss.IndexFlatL2(embeddings_np.shape[1])
+        index.add(embeddings_np)
+        
+        self.indexes[name] = index
+        self.documents[name] = all_chunks
+        
+        faiss.write_index(index, str(self.index_dir / f"{name}.index"))
+        with open(self.index_dir / f"{name}.json", "w") as f:
+            json.dump(all_chunks, f)
+        
+        return {"status": "created", "name": name, "chunks": len(all_chunks)}
     
-    async def search(self, kb_name: str, query: str, top_k: int = 5) -> List[Dict]:
-        if kb_name not in self.indexes or self.indexes[kb_name].ntotal == 0:
-            return []
-        query_emb = (await self._get_embedding(query)).reshape(1, -1)
-        k = min(top_k, self.indexes[kb_name].ntotal)
-        distances, indices = self.indexes[kb_name].search(query_emb, k)
+    async def search_kb(self, name: str, query: str, top_k: int = 5) -> List[Dict]:
+        if name not in self.indexes:
+            return [{"error": f"KB {name} not found"}]
+        
+        query_emb = await self._get_embedding(query)
+        D, I = self.indexes[name].search(query_emb.reshape(1, -1), top_k)
+        
         results = []
-        for i, (dist, idx) in enumerate(zip(distances[0], indices[0])):
-            if 0 <= idx < len(self.documents[kb_name]):
-                doc = self.documents[kb_name][idx]
-                results.append({"content": doc["content"], "score": float(dist), "rank": i + 1})
+        for i, (dist, idx) in enumerate(zip(D[0], I[0])):
+            if idx < len(self.documents[name]):
+                results.append({
+                    "rank": i + 1,
+                    "text": self.documents[name][idx]["text"],
+                    "score": float(1 / (1 + dist))
+                })
         return results
     
-    async def list_kbs(self) -> List[Dict]:
-        return [{"name": n, "docs": len(self.documents.get(n, []))} for n in self.indexes]
+    async def list_kbs(self) -> List[str]:
+        return list(self.indexes.keys())
 
 
 # MEM0 TOOLS
 @mcp.tool()
-async def mem0_add(content: str, user_id: str = None, metadata: dict = None) -> str:
-    """Add a memory to Mem0."""
+async def mem0_add(content: str, user_id: str = None, metadata: str = None) -> str:
+    """Add memory to Mem0."""
     full_user_id = get_full_user_id(user_id)
+    payload = {"messages": [{"role": "user", "content": content}], "user_id": full_user_id}
+    if metadata:
+        try:
+            payload["metadata"] = json.loads(metadata)
+        except:
+            pass
     try:
-        payload = {"messages": [{"role": "user", "content": content}], "user_id": full_user_id}
-        if metadata:
-            payload["metadata"] = metadata
         response = await http_client.post(f"{MEM0_API_URL}/v1/memories/", json=payload)
-        return json.dumps(response.json() if response.status_code == 200 else {"error": response.text}, ensure_ascii=False)
+        return json.dumps(response.json(), ensure_ascii=False, indent=2)
     except Exception as e:
         return json.dumps({"error": str(e)})
 
@@ -236,42 +241,42 @@ async def mem0_search(query: str, user_id: str = None, limit: int = 10) -> str:
     """Search memories in Mem0."""
     full_user_id = get_full_user_id(user_id)
     try:
-        response = await http_client.post(f"{MEM0_API_URL}/v1/memories/search/", json={"query": query, "user_id": full_user_id, "limit": limit})
-        return json.dumps(response.json() if response.status_code == 200 else {"error": response.text}, ensure_ascii=False)
+        response = await http_client.post(
+            f"{MEM0_API_URL}/v1/memories/search/",
+            json={"query": query, "user_id": full_user_id, "limit": limit}
+        )
+        return json.dumps(response.json(), ensure_ascii=False, indent=2)
     except Exception as e:
         return json.dumps({"error": str(e)})
 
 
 @mcp.tool()
 async def mem0_get_all(user_id: str = None) -> str:
-    """Get all memories for a user."""
+    """Get all memories for user."""
     full_user_id = get_full_user_id(user_id)
     try:
         response = await http_client.get(f"{MEM0_API_URL}/v1/memories/", params={"user_id": full_user_id})
-        return json.dumps(response.json() if response.status_code == 200 else {"error": response.text}, ensure_ascii=False)
+        return json.dumps(response.json(), ensure_ascii=False, indent=2)
     except Exception as e:
         return json.dumps({"error": str(e)})
 
 
 # KB TOOLS
 @mcp.tool()
-async def kb_create(name: str, description: str = "") -> str:
-    """Create a new knowledge base."""
-    result = await kb_manager.create_kb(name, description)
-    return json.dumps(result, ensure_ascii=False)
+async def kb_create(name: str, documents: str) -> str:
+    """Create knowledge base from documents (JSON array of strings)."""
+    try:
+        docs = json.loads(documents)
+        result = await kb_manager.create_kb(name, docs)
+        return json.dumps(result, ensure_ascii=False)
+    except Exception as e:
+        return json.dumps({"error": str(e)})
 
 
 @mcp.tool()
-async def kb_add_document(kb_name: str, content: str, title: str = None) -> str:
-    """Add a document to a knowledge base."""
-    result = await kb_manager.add_document(kb_name, content, {"title": title} if title else {})
-    return json.dumps(result, ensure_ascii=False)
-
-
-@mcp.tool()
-async def kb_search(kb_name: str, query: str, top_k: int = 5) -> str:
-    """Search a knowledge base."""
-    results = await kb_manager.search(kb_name, query, top_k)
+async def kb_search(name: str, query: str, top_k: int = 5) -> str:
+    """Search knowledge base."""
+    results = await kb_manager.search_kb(name, query, top_k)
     return json.dumps(results, ensure_ascii=False, indent=2)
 
 
@@ -284,7 +289,7 @@ async def kb_list() -> str:
 # GRAPHITI TOOLS
 @mcp.tool()
 async def graphiti_add_episode(content: str, name: str = None, source: str = "user") -> str:
-    """Add an episode to Graphiti temporal knowledge graph. Episodes are isolated by project."""
+    """Add an episode to Graphiti temporal knowledge graph."""
     if not graphiti_client or not graphiti_client.initialized:
         return json.dumps({"error": "Graphiti not available"})
     result = await graphiti_client.add_episode(content, name, source)
@@ -293,7 +298,7 @@ async def graphiti_add_episode(content: str, name: str = None, source: str = "us
 
 @mcp.tool()
 async def graphiti_search(query: str, num_results: int = 10) -> str:
-    """Search the Graphiti knowledge graph. Searches only within current project."""
+    """Search the Graphiti knowledge graph."""
     if not graphiti_client or not graphiti_client.initialized:
         return json.dumps({"error": "Graphiti not available"})
     result = await graphiti_client.search(query, num_results)
@@ -302,7 +307,7 @@ async def graphiti_search(query: str, num_results: int = 10) -> str:
 
 @mcp.tool()
 async def graphiti_get_episodes(last_n: int = 10) -> str:
-    """Get recent episodes from Graphiti. Returns only episodes from current project."""
+    """Get recent episodes from Graphiti."""
     if not graphiti_client or not graphiti_client.initialized:
         return json.dumps({"error": "Graphiti not available"})
     result = await graphiti_client.get_episodes(last_n)
@@ -326,7 +331,7 @@ async def get_project_info() -> str:
 # MAIN
 async def startup():
     global http_client, kb_manager, graphiti_client
-    logger.info(f"🚀 Starting Unified MCP Server for '{PROJECT_ID}'")
+    logger.info(f"🚀 Starting Unified MCP Server for \"{PROJECT_ID}\"")
     http_client = httpx.AsyncClient(timeout=30.0)
     kb_manager = KnowledgeBaseManager(KNOWLEDGE_BASES_ROOT, FAISS_INDEX_DIR, PROJECT_ID)
     await kb_manager.initialize()
@@ -347,7 +352,7 @@ async def shutdown():
 if __name__ == "__main__":
     import uvicorn
     from starlette.applications import Starlette
-    from starlette.routing import Route, Mount
+    from starlette.routing import Route
     from starlette.responses import JSONResponse
     
     async def health(request):
@@ -359,17 +364,12 @@ if __name__ == "__main__":
         yield
         await shutdown()
     
-    # Get SSE app from FastMCP
+    # Get SSE app from FastMCP - it has /sse and /messages routes
     sse_app = mcp.sse_app()
     
-    app = Starlette(
-        routes=[
-            Route("/", health),
-            Route("/health", health),
-            Mount("/sse", app=sse_app),
-            Mount("/mcp", app=sse_app),  # Also mount at /mcp for nginx compatibility
-        ],
-        lifespan=lifespan
-    )
+    # Add health route to sse_app
+    sse_app.add_route("/", health, methods=["GET"])
+    sse_app.add_route("/health", health, methods=["GET"])
     
-    uvicorn.run(app, host="0.0.0.0", port=MCP_PORT)
+    # Run sse_app directly - no nested mounting
+    uvicorn.run(sse_app, host="0.0.0.0", port=MCP_PORT, lifespan="on")
