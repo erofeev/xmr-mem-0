@@ -5,7 +5,7 @@
 mcpServers:
   graphiti:
     type: streamable-http
-    url: http://graphiti:8000/mcp/
+    url: http://graphiti:8000/mcp
     timeout: 60000
     connectionMode: lenient
 
