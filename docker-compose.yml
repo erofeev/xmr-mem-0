@@ -34,11 +34,14 @@ services:
       context: ./cipher-src
       dockerfile: Dockerfile
     container_name: mcp-cipher
+    command: sh -c "node dist/src/app/index.cjs --mode api --port 3000 --host 0.0.0.0 --agent /app/memAgent/cipher.yml --mcp-transport-type sse"
     restart: unless-stopped
     networks:
       - mcp_network
     environment:
       - NODE_ENV=production
+      - MCP_SERVER_MODE=aggregator
+      - USE_ASK_CIPHER=true
       - CIPHER_API_PREFIX=
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
       - POSTGRES_CONNECTION_STRING=postgresql://mem0:${POSTGRES_PASSWORD}@postgres:5432/cipher
