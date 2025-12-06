@@ -55,83 +55,168 @@ def get_full_user_id(user_id: Optional[str] = None) -> str:
 
 
 class GraphitiClient:
-    """Client for Graphiti MCP Server with project isolation via group_id"""
+    """Client for Graphiti MCP Server with Streamable HTTP transport and project isolation via group_id"""
 
     def __init__(self, api_url: str, project_id: str):
         self.api_url = api_url.rstrip("/")
         self.project_id = project_id
         self.client: Optional[httpx.AsyncClient] = None
+        self.session_id: Optional[str] = None
         self.initialized = False
+        self._request_id = 0
 
     async def initialize(self):
+        """Initialize connection and establish MCP session with Graphiti"""
         try:
-            self.client = httpx.AsyncClient(timeout=60.0)
+            self.client = httpx.AsyncClient(timeout=120.0)
+            # Check health first
             response = await self.client.get(f"{self.api_url}/health")
-            self.initialized = response.status_code == 200
-            if self.initialized:
-                logger.info(f"Graphiti client initialized (group_id={self.project_id})")
+            if response.status_code != 200:
+                logger.error(f"Graphiti health check failed: {response.status_code}")
+                return
+
+            # Initialize MCP session with Streamable HTTP
+            init_result = await self._mcp_initialize()
+            if "error" not in init_result:
+                self.initialized = True
+                logger.info(f"Graphiti client initialized (group_id={self.project_id}, session={self.session_id})")
+            else:
+                logger.error(f"Graphiti MCP init failed: {init_result.get('error')}")
         except Exception as e:
             logger.error(f"Graphiti connection failed: {e}")
+
+    async def _mcp_initialize(self) -> Dict:
+        """Perform MCP protocol initialization and get session ID"""
+        self._request_id += 1
+        payload = {
+            "jsonrpc": "2.0",
+            "id": self._request_id,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": {"name": f"unified-{self.project_id}", "version": "1.0"}
+            }
+        }
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json, text/event-stream"
+        }
+        try:
+            response = await self.client.post(f"{self.api_url}/mcp", json=payload, headers=headers)
+            # Get session ID from headers
+            self.session_id = response.headers.get("mcp-session-id")
+            # Parse SSE response
+            return self._parse_sse_response(response.text)
+        except Exception as e:
+            return {"error": str(e)}
+
+    def _parse_sse_response(self, text: str) -> Dict:
+        """Parse Server-Sent Events response from Graphiti"""
+        for line in text.split("\n"):
+            if line.startswith("data: "):
+                try:
+                    data = json.loads(line[6:])
+                    if "result" in data:
+                        return data["result"]
+                    elif "error" in data:
+                        return {"error": data["error"]}
+                    return data
+                except json.JSONDecodeError:
+                    continue
+        return {"error": "No valid SSE data found"}
 
     async def close(self):
         if self.client:
             await self.client.aclose()
 
-    async def _call_mcp(self, method: str, params: Dict = None) -> Dict:
+    async def _call_tool(self, tool_name: str, arguments: Dict = None) -> Dict:
+        """Call a Graphiti MCP tool using Streamable HTTP protocol"""
         if not self.initialized:
             return {"error": "Graphiti not initialized"}
+        if not self.session_id:
+            return {"error": "No MCP session"}
+
+        self._request_id += 1
+        payload = {
+            "jsonrpc": "2.0",
+            "id": self._request_id,
+            "method": "tools/call",
+            "params": {
+                "name": tool_name,
+                "arguments": arguments or {}
+            }
+        }
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json, text/event-stream",
+            "Mcp-Session-Id": self.session_id
+        }
         try:
-            payload = {"jsonrpc": "2.0", "method": method, "params": params or {}, "id": 1}
-            response = await self.client.post(f"{self.api_url}/mcp/", json=payload)
-            return response.json() if response.status_code == 200 else {"error": f"HTTP {response.status_code}"}
+            response = await self.client.post(f"{self.api_url}/mcp", json=payload, headers=headers)
+            if response.status_code == 404:
+                # Session expired, reinitialize
+                logger.warning("Graphiti session expired, reinitializing...")
+                await self._mcp_initialize()
+                # Retry with new session
+                headers["Mcp-Session-Id"] = self.session_id
+                response = await self.client.post(f"{self.api_url}/mcp", json=payload, headers=headers)
+            return self._parse_sse_response(response.text)
         except Exception as e:
             return {"error": str(e)}
 
-    async def add_episode(self, content: str, name: str = None, source: str = "user") -> Dict:
-        params = {
-            "content": content,
+    async def add_episode(self, content: str, name: str = None, source: str = "text") -> Dict:
+        """Add an episode to the knowledge graph"""
+        args = {
+            "name": name or f"Episode_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
+            "episode_body": content,
             "source": source,
-            "reference_time": datetime.now().isoformat(),
             "group_id": self.project_id
         }
-        if name:
-            params["name"] = name
-        return await self._call_mcp("tools/add_episode", params)
+        return await self._call_tool("add_memory", args)
 
-    async def search_nodes(self, query: str, num_results: int = 10) -> Dict:
-        return await self._call_mcp("tools/search_nodes", {
+    async def search_nodes(self, query: str, max_nodes: int = 10) -> Dict:
+        """Search for entities in the knowledge graph"""
+        return await self._call_tool("search_nodes", {
             "query": query,
-            "num_results": num_results,
+            "max_nodes": max_nodes,
             "group_ids": [self.project_id]
         })
 
-    async def search_facts(self, query: str, num_results: int = 10) -> Dict:
-        return await self._call_mcp("tools/search_facts", {
+    async def search_facts(self, query: str, max_facts: int = 10) -> Dict:
+        """Search for facts/relationships in the knowledge graph"""
+        return await self._call_tool("search_memory_facts", {
             "query": query,
-            "num_results": num_results,
+            "max_facts": max_facts,
             "group_ids": [self.project_id]
         })
 
-    async def get_episodes(self, last_n: int = 10) -> Dict:
-        return await self._call_mcp("tools/get_episodes", {
-            "last_n": last_n,
+    async def get_episodes(self, max_episodes: int = 10) -> Dict:
+        """Get recent episodes from the knowledge graph"""
+        return await self._call_tool("get_episodes", {
+            "max_episodes": max_episodes,
             "group_ids": [self.project_id]
         })
 
     async def delete_episode(self, episode_uuid: str) -> Dict:
-        return await self._call_mcp("tools/delete_episode", {"episode_uuid": episode_uuid})
+        """Delete an episode by UUID"""
+        return await self._call_tool("delete_episode", {"uuid": episode_uuid})
 
     async def get_entity_edge(self, uuid: str) -> Dict:
-        return await self._call_mcp("tools/get_entity_edge", {"uuid": uuid})
+        """Get an entity edge by UUID"""
+        return await self._call_tool("get_entity_edge", {"uuid": uuid})
 
     async def delete_entity_edge(self, uuid: str) -> Dict:
-        return await self._call_mcp("tools/delete_entity_edge", {"uuid": uuid})
+        """Delete an entity edge by UUID"""
+        return await self._call_tool("delete_entity_edge", {"uuid": uuid})
 
     async def get_status(self) -> Dict:
-        return await self._call_mcp("tools/get_status", {})
+        """Get Graphiti server status"""
+        return await self._call_tool("get_status", {})
 
     async def clear_graph(self) -> Dict:
-        return await self._call_mcp("tools/clear_graph", {"group_id": self.project_id})
+        """Clear all data for this project's group_id"""
+        return await self._call_tool("clear_graph", {"group_ids": [self.project_id]})
 
 
 class KnowledgeBaseManager:
@@ -813,7 +898,7 @@ if __name__ == "__main__":
         return JSONResponse({"status": "healthy", "project": PROJECT_ID})
 
     # Создаём http_app с указанием path
-    http_app = mcp.http_app(path="/mcp")
+    http_app = mcp.http_app(path="/mcp", stateless_http=True)
     
     # Создаём обёртку для lifespan чтобы добавить наш startup/shutdown
     original_lifespan = http_app.lifespan

@@ -1,44 +1,43 @@
-# Graphiti MCP Server Configuration - Anthropic + Ollama Embeddings
+# Graphiti MCP Server Configuration - Anthropic LLM + Ollama Embeddings
 server:
   transport: "http"
   host: "0.0.0.0"
   port: 8000
-  
+
 llm:
   provider: "anthropic"
-  model: "claude-3-haiku-20240307"
+  model: "claude-sonnet-4-5-20250929"
   max_tokens: 4096
-  
+  temperature: 0.0
+
   providers:
     anthropic:
       api_key: ${ANTHROPIC_API_KEY}
+      api_url: "https://api.anthropic.com"
       max_retries: 3
-    openai:
-      api_key: ${OPENAI_API_KEY}
-      api_url: ${OPENAI_BASE_URL:http://ollama:11434/v1}
 
 embedder:
   provider: "openai"
   model: "nomic-embed-text"
   dimensions: 768
-  
+
   providers:
     openai:
-      api_key: ${OPENAI_API_KEY}
-      api_url: ${OPENAI_BASE_URL:http://ollama:11434/v1}
+      api_key: "ollama-key"
+      api_url: "http://ollama:11434/v1"
 
 database:
   provider: "falkordb"
-  
+
   providers:
     falkordb:
-      uri: ${FALKORDB_URI:redis://falkordb:6379}
-      password: ${FALKORDB_PASSWORD:}
-      database: ${FALKORDB_DATABASE:default_db}
+      uri: "redis://falkordb:6379"
+      password: ""
+      database: "graphiti_db"
 
 graphiti:
-  group_id: ${GRAPHITI_GROUP_ID:main}
-  user_id: ${USER_ID:mcp_user}
+  group_id: "default"
+  user_id: "mcp_user"
   entity_types:
     - name: "Preference"
       description: "User preferences, choices, opinions"
