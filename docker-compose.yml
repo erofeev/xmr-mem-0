@@ -242,6 +242,10 @@ services:
     environment:
       - PYTHONUNBUFFERED=1
       - CURRENT_PROJECT_ID=terra
+      - PROJECT_ID=terra
+      - POSTGRES_PASSWORD=5485c3a6468a7b2db50e36be5fc0e7a1
+      - POSTGRES_HOST=postgres
+      - POSTGRES_USER=mem0
       - MEM0_API_URL=http://mem0-terra:8000
       - MCP_PORT=8080
       - KNOWLEDGE_BASES_ROOT=/data/knowledge_bases
@@ -340,6 +344,10 @@ services:
     environment:
       - PYTHONUNBUFFERED=1
       - CURRENT_PROJECT_ID=sport
+      - PROJECT_ID=sport
+      - POSTGRES_PASSWORD=5485c3a6468a7b2db50e36be5fc0e7a1
+      - POSTGRES_HOST=postgres
+      - POSTGRES_USER=mem0
       - MEM0_API_URL=http://mem0-sport:8000
       - MCP_PORT=8080
       - KNOWLEDGE_BASES_ROOT=/data/knowledge_bases
@@ -439,6 +447,10 @@ services:
     environment:
       - PYTHONUNBUFFERED=1
       - CURRENT_PROJECT_ID=datashowcase
+      - PROJECT_ID=datashowcase
+      - POSTGRES_PASSWORD=5485c3a6468a7b2db50e36be5fc0e7a1
+      - POSTGRES_HOST=postgres
+      - POSTGRES_USER=mem0
       - MEM0_API_URL=http://mem0-datashowcase:8000
       - MCP_PORT=8080
       - KNOWLEDGE_BASES_ROOT=/data/knowledge_bases
@@ -537,6 +549,10 @@ services:
     environment:
       - PYTHONUNBUFFERED=1
       - CURRENT_PROJECT_ID=trialprj
+      - PROJECT_ID=trialprj
+      - POSTGRES_PASSWORD=5485c3a6468a7b2db50e36be5fc0e7a1
+      - POSTGRES_HOST=postgres
+      - POSTGRES_USER=mem0
       - MEM0_API_URL=http://mem0-trialprj:8000
       - MCP_PORT=8080
       - KNOWLEDGE_BASES_ROOT=/data/knowledge_bases

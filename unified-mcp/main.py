@@ -17,6 +17,8 @@ import httpx
 import numpy as np
 from dotenv import load_dotenv
 from fastmcp import FastMCP
+# SSOT Layer
+from ssot import PostgresSSOT, DeduplicationOrchestrator
 
 load_dotenv()
 
@@ -44,6 +46,10 @@ GRAPHITI_API_URL = os.getenv("GRAPHITI_API_URL", "http://graphiti:8000")
 http_client: Optional[httpx.AsyncClient] = None
 kb_manager: Optional["KnowledgeBaseManager"] = None
 graphiti_client: Optional["GraphitiClient"] = None
+# SSOT instances
+ssot_manager: Optional[PostgresSSOT] = None
+dedup_orchestrator: Optional[DeduplicationOrchestrator] = None
+POSTGRES_URL = os.getenv("POSTGRES_URL", "postgresql://mem0:${POSTGRES_PASSWORD}@postgres:5432/mem0_" + PROJECT_ID)
 
 # Initialize FastMCP
 mcp = FastMCP(f"unified-{PROJECT_ID}")
@@ -863,26 +869,217 @@ async def get_project_info() -> str:
     }, ensure_ascii=False, indent=2)
 
 
+# ==================== SSOT TOOLS (5-layer deduplication) ====================
+
+@mcp.tool()
+async def ssot_memory_add(content: str, user_id: str = None, memory_type: str = "system1", 
+                          domain: str = None, tags: str = None) -> str:
+    """Add memory with 5-layer deduplication. Returns operation result (ADD/UPDATE/NONE)."""
+    if not ssot_manager or not dedup_orchestrator:
+        return json.dumps({"error": "SSOT not initialized"})
+    
+    full_user_id = get_full_user_id(user_id)
+    tags_list = tags.split(",") if tags else None
+    
+    # Run 5-layer deduplication
+    dedup_result = await dedup_orchestrator.process(content, "memory", full_user_id, PROJECT_ID)
+    
+    if dedup_result["operation"] == "NONE":
+        return json.dumps({
+            "status": "skipped",
+            "reason": dedup_result["reason"],
+            "similar_id": dedup_result.get("similar_id"),
+            "similarity": dedup_result.get("similarity_score", 0)
+        }, ensure_ascii=False)
+    
+    # Get embedding
+    embedding = await kb_manager._get_embedding(content)
+    
+    # Store in SSOT
+    memory_id = await ssot_manager.add_memory(
+        user_id=full_user_id,
+        content=content,
+        embedding=embedding.tolist() if hasattr(embedding, "tolist") else list(embedding),
+        memory_type=memory_type,
+        project_id=PROJECT_ID,
+        domain=domain,
+        tags=tags_list
+    )
+    
+    # Register in dedup registry
+    await dedup_orchestrator.register(
+        content, "memory", memory_id, dedup_result["operation"],
+        embedding.tolist() if hasattr(embedding, "tolist") else list(embedding)
+    )
+    
+    return json.dumps({
+        "status": "added",
+        "id": memory_id,
+        "operation": dedup_result["operation"],
+        "memory_type": memory_type
+    }, ensure_ascii=False)
+
+
+@mcp.tool()
+async def ssot_memory_search(query: str, user_id: str = None, limit: int = 10) -> str:
+    """Search memories in SSOT with semantic similarity."""
+    if not ssot_manager:
+        return json.dumps({"error": "SSOT not initialized"})
+    
+    full_user_id = get_full_user_id(user_id) if user_id else None
+    embedding = await kb_manager._get_embedding(query)
+    
+    results = await ssot_manager.search_memories(
+        embedding=embedding.tolist() if hasattr(embedding, "tolist") else list(embedding),
+        limit=limit,
+        user_id=full_user_id,
+        project_id=PROJECT_ID
+    )
+    
+    return json.dumps({"results": results, "count": len(results)}, ensure_ascii=False)
+
+
+@mcp.tool()
+async def ssot_unified_search(query: str, limit: int = 10) -> str:
+    """Search across ALL sources (memories, episodes, entities, KB) with ranking."""
+    if not ssot_manager:
+        return json.dumps({"error": "SSOT not initialized"})
+    
+    embedding = await kb_manager._get_embedding(query)
+    
+    results = await ssot_manager.unified_search(
+        embedding=embedding.tolist() if hasattr(embedding, "tolist") else list(embedding),
+        limit=limit
+    )
+    
+    return json.dumps({"results": results, "count": len(results)}, ensure_ascii=False)
+
+
+@mcp.tool()
+async def ssot_workspace_add(content: str, team_member: str = None, 
+                             activity_type: str = None, status: str = None) -> str:
+    """Add workspace memory (team context) with deduplication."""
+    if not ssot_manager or not dedup_orchestrator:
+        return json.dumps({"error": "SSOT not initialized"})
+    
+    # Deduplication
+    dedup_result = await dedup_orchestrator.process(content, "workspace", "workspace", PROJECT_ID)
+    
+    if dedup_result["operation"] == "NONE":
+        return json.dumps({
+            "status": "skipped", 
+            "reason": dedup_result["reason"]
+        }, ensure_ascii=False)
+    
+    embedding = await kb_manager._get_embedding(content)
+    
+    workspace_id = await ssot_manager.add_workspace_memory(
+        project_id=PROJECT_ID,
+        content=content,
+        embedding=embedding.tolist() if hasattr(embedding, "tolist") else list(embedding),
+        team_member=team_member,
+        activity_type=activity_type,
+        status=status
+    )
+    
+    await dedup_orchestrator.register(content, "workspace", workspace_id, dedup_result["operation"])
+    
+    return json.dumps({
+        "status": "added",
+        "id": workspace_id,
+        "team_member": team_member,
+        "activity_type": activity_type
+    }, ensure_ascii=False)
+
+
+@mcp.tool()
+async def ssot_sync_episode(content: str, name: str = None, user_id: str = None) -> str:
+    """Sync episode to SSOT PostgreSQL (for temporal queries)."""
+    if not ssot_manager:
+        return json.dumps({"error": "SSOT not initialized"})
+    
+    full_user_id = get_full_user_id(user_id)
+    embedding = await kb_manager._get_embedding(content)
+    
+    import uuid
+    graphiti_uuid = str(uuid.uuid4())
+    
+    episode_id = await ssot_manager.sync_episode(
+        graphiti_uuid=graphiti_uuid,
+        user_id=full_user_id,
+        content=content,
+        embedding=embedding.tolist() if hasattr(embedding, "tolist") else list(embedding),
+        name=name
+    )
+    
+    return json.dumps({
+        "status": "synced",
+        "id": episode_id,
+        "graphiti_uuid": graphiti_uuid
+    }, ensure_ascii=False)
+
+
+@mcp.tool()
+async def ssot_get_stats() -> str:
+    """Get SSOT statistics: counts by source type."""
+    if not ssot_manager:
+        return json.dumps({"error": "SSOT not initialized"})
+    
+    async with ssot_manager.pool.acquire() as conn:
+        stats = {}
+        for table in ["memories", "workspace_memories", "graphiti_episodes", 
+                      "graphiti_entities", "kb_chunks", "dedup_registry"]:
+            row = await conn.fetchrow(f"SELECT COUNT(*) as cnt FROM {table}")
+            stats[table] = row["cnt"]
+    
+    return json.dumps({
+        "project": PROJECT_ID,
+        "counts": stats,
+        "total": sum(stats.values())
+    }, ensure_ascii=False)
+
+
+
 # ==================== MAIN ====================
 
 async def startup():
-    global http_client, kb_manager, graphiti_client
+    global http_client, kb_manager, graphiti_client, ssot_manager, dedup_orchestrator
     logger.info(f"Starting Unified MCP Server for \"{PROJECT_ID}\"")
     http_client = httpx.AsyncClient(timeout=30.0)
     kb_manager = KnowledgeBaseManager(KNOWLEDGE_BASES_ROOT, FAISS_INDEX_DIR, PROJECT_ID)
     await kb_manager.initialize()
+    
+    # SSOT initialization
+    try:
+        postgres_url = POSTGRES_URL.replace("${POSTGRES_PASSWORD}", os.getenv("POSTGRES_PASSWORD", ""))
+        ssot_manager = PostgresSSOT(postgres_url, PROJECT_ID)
+        await ssot_manager.initialize()
+        
+        async def get_embedding_wrapper(text: str):
+            return await kb_manager._get_embedding(text)
+        
+        dedup_orchestrator = DeduplicationOrchestrator(ssot_manager, get_embedding_wrapper)
+        logger.info("SSOT layer initialized with 5-layer deduplication")
+    except Exception as e:
+        logger.warning(f"SSOT initialization failed (non-critical): {e}")
+        ssot_manager = None
+        dedup_orchestrator = None
+    
     if GRAPHITI_ENABLED:
         graphiti_client = GraphitiClient(GRAPHITI_API_URL, PROJECT_ID)
         await graphiti_client.initialize()
-    logger.info(f"Server ready: mem0=True, kb=True, graphiti={GRAPHITI_ENABLED}")
+    logger.info(f"Server ready: mem0=True, kb=True, graphiti={GRAPHITI_ENABLED}, ssot={ssot_manager is not None}")
 
 
 async def shutdown():
-    global http_client, graphiti_client
+    global http_client, graphiti_client, ssot_manager
     if http_client:
         await http_client.aclose()
     if graphiti_client:
         await graphiti_client.close()
+    if ssot_manager:
+        await ssot_manager.close()
+    logger.info("Server stopped")
     logger.info("Server stopped")
 
 
