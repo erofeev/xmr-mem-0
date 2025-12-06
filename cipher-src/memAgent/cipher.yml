@@ -1,0 +1,56 @@
+# MCP Team Memory - Cipher Configuration (Aggregator Mode)
+# Single entry point for all memory, knowledge graph, and timeline tools
+
+# MCP Servers to aggregate (Cipher exposes their tools as its own)
+mcpServers:
+  graphiti:
+    type: streamable-http
+    url: http://graphiti:8000/mcp/
+    timeout: 60000
+    connectionMode: lenient
+
+# LLM for memory extraction and reasoning
+llm:
+  provider: anthropic
+  model: claude-3-5-haiku-20241022
+  apiKey: $ANTHROPIC_API_KEY
+  maxIterations: 50
+
+# Evaluation LLM for reflection (optional, falls back to main llm)
+evalLlm:
+  provider: anthropic
+  model: claude-3-5-haiku-20241022
+  apiKey: $ANTHROPIC_API_KEY
+
+# Embeddings via Ollama (local)
+embedding:
+  type: ollama
+  model: nomic-embed-text
+  baseUrl: http://ollama:11434
+
+# Session management
+sessions:
+  maxSessions: 100
+  sessionTTL: 3600000
+
+# System prompt as string
+systemPrompt: |
+  You are an AI programming assistant with persistent memory.
+  
+  MEMORY CAPABILITIES:
+  - Store facts, decisions, and context across sessions
+  - Use Knowledge Memory for programming concepts and patterns
+  - Use Reflection Memory for reasoning traces and problem-solving
+  - Use Knowledge Graph for entity relationships
+  
+  TIMELINE QUERIES (via Graphiti):
+  - Search facts and entities over time
+  - Track project evolution
+  - Find who worked on what
+  
+  When you learn something important:
+  1. Store it in appropriate memory type
+  2. Extract entities and relationships
+  3. Record decisions with reasoning
+  
+  Always provide clear, concise responses focused on coding tasks.
