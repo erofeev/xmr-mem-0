@@ -19,6 +19,7 @@ import httpx
 import numpy as np
 from dotenv import load_dotenv
 from fastmcp import FastMCP
+from contextlib import asynccontextmanager
 
 load_dotenv()
 
@@ -511,10 +512,37 @@ async def get_project_info() -> str:
 
 # ==================== STARTUP ====================
 
-@mcp.on_event("startup")
+_initialized = False
+
+async def ensure_initialized():
+    global _initialized, kb_manager
+    if _initialized:
+        return
+    _initialized = True
+    
+    logger.info(f"Starting Unified MCP Server v3.0 for {PROJECT_ID}")
+    kb_manager = KnowledgeBaseManager(KNOWLEDGE_BASES_ROOT, FAISS_INDEX_DIR, PROJECT_ID)
+    await kb_manager.initialize()
+    
+    # Check components
+    cipher_ok = graphiti_ok = False
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            r = await client.get(f"{CIPHER_URL}/health")
+            cipher_ok = r.status_code == 200
+    except: pass
+    
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            r = await client.get(f"{GRAPHITI_URL}/health")
+            graphiti_ok = r.status_code == 200
+    except: pass
+    
+    logger.info(f"Server ready: cipher={cipher_ok}, graphiti={graphiti_ok}, kb=True")
+
+# Keep old function signature for compatibility
 async def startup():
     global kb_manager
-    logger.info(f"Starting Unified MCP Server v3.0 for \"{PROJECT_ID}\"")
     
     kb_manager = KnowledgeBaseManager(KNOWLEDGE_BASES_ROOT, FAISS_INDEX_DIR, PROJECT_ID)
     await kb_manager.initialize()
@@ -537,11 +565,14 @@ async def startup():
 
 
 @mcp.custom_route("/health", methods=["GET"])
-async def health():
+async def health(request):
+    await ensure_initialized()
     from starlette.responses import JSONResponse
-    return JSONResponse({"status": "healthy", "project": PROJECT_ID, "version": "3.0.0"})
+    return JSONResponse({"status": "healthy", "project": PROJECT_ID, "version": "3.0.0", "initialized": _initialized})
+
+
 
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main_v3:mcp.sse_app()", host="0.0.0.0", port=8080, factory=True)
+    uvicorn.run("main:mcp.http_app", host="0.0.0.0", port=8080, factory=True)

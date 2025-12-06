@@ -58,7 +58,7 @@ services:
       ollama:
         condition: service_healthy
     healthcheck:
-      test: ["CMD-SHELL", "true"]
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:3000/health"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -101,7 +101,7 @@ services:
       graphiti:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "wget", "-q", "-O-", "http://localhost:8080/health"]
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8080/health"]
       interval: 10s
       timeout: 5s
       retries: 3
@@ -143,7 +143,7 @@ services:
       graphiti:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "wget", "-q", "-O-", "http://localhost:8080/health"]
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8080/health"]
       interval: 10s
       timeout: 5s
       retries: 3
@@ -185,7 +185,7 @@ services:
       graphiti:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "wget", "-q", "-O-", "http://localhost:8080/health"]
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8080/health"]
       interval: 10s
       timeout: 5s
       retries: 3
@@ -227,7 +227,7 @@ services:
       graphiti:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "wget", "-q", "-O-", "http://localhost:8080/health"]
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8080/health"]
       interval: 10s
       timeout: 5s
       retries: 3
@@ -266,7 +266,7 @@ services:
     networks:
       - mcp_network
     healthcheck:
-      test: ["CMD-SHELL", "true"]
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:6333/readyz"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -302,7 +302,7 @@ services:
     networks:
       - mcp_network
     healthcheck:
-      test: ["CMD-SHELL", "true"]
+      test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
       interval: 30s
       timeout: 10s
       retries: 5
@@ -314,7 +314,7 @@ services:
 
   graphiti:
     build:
-      context: ./graphiti-custom
+      context: ./graphiti
       dockerfile: Dockerfile
     container_name: graphiti
     restart: unless-stopped
@@ -322,22 +322,12 @@ services:
       - mcp_network
     environment:
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
-      - LLM_PROVIDER=anthropic
-      - LLM_MODEL=claude-3-5-haiku-20241022
-      - EMBEDDER_PROVIDER=openai
-      - OPENAI_API_KEY=ollama-key
-      - OPENAI_BASE_URL=http://ollama:11434/v1
-      - FALKORDB_URI=redis://falkordb:6379
-      - FALKORDB_HOST=falkordb
-      - FALKORDB_PORT=6379
-      - FALKORDB_DATABASE=graphiti
+      - NEO4J_URI=bolt://falkordb:6379
       - EMBEDDING_MODEL=nomic-embed-text
       - OLLAMA_BASE_URL=http://ollama:11434
       - HTTP_PROXY=http://172.18.0.1:10809
       - HTTPS_PROXY=http://172.18.0.1:10809
       - NO_PROXY=localhost,127.0.0.1,ollama,falkordb
-    volumes:
-      - ./graphiti/config.yaml:/app/mcp/config.yaml:ro
     depends_on:
       falkordb:
         condition: service_healthy
